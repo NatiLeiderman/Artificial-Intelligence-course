@@ -513,7 +513,20 @@ problem4 = {
 
 def main():
     start = time.time()
-    problem = [problem4]
+    problem = [ problem4,
+                problem_harder44,
+                problem_10x10_single,
+                problem_12x12_snake,
+                problem_12x12_snake_hard,
+                problem_hard1,
+                problem_hard2,
+                problem_hard3,
+                problem_hard4,
+                problem_hard5,
+                problem_hard6,
+                problem_hard7,
+                problem5_deadend
+                ]
     for p in problem:
         for a in ['astar']:
             solve_problems(p, a)
