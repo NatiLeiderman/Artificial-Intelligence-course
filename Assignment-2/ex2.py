@@ -2,10 +2,10 @@ from __future__ import generators
 from utils import *
 import math, random, sys, time, bisect, string
 import operator, copy, os.path, inspect
-
+import ext_plant
 
 class Controller:
-    def __init__(self, game):
+    def __init__(self, game: ext_plant.Game):
         self.game = game
         self.problem_desc = game.get_problem()
         self.rows, self.cols = self.problem_desc["Size"]
@@ -13,18 +13,23 @@ class Controller:
         self.capacities = game.get_capacities()
         
         probs = self.problem_desc.get("robot_chosen_action_prob", {})
+        self.MAX_PROB = 0
+        for p in probs.values():
+            if p > self.MAX_PROB:
+                self.MAX_PROB = p
+        
+        if self.MAX_PROB == 0: self.MAX_PROB = 1.0
         self.primary_id = max(probs, key=lambda rid: (probs[rid], self.capacities.get(rid, 0)))
         
         self.action_stack = []
-        self.current_target_plant = None
-        self.last_state_check = None 
+        self.best_Astar_subpath = []
         self.last_state = None
         self.last_action = None
 
-    def _get_robot_data(self, state):
-        for rid, pos, load in state[0]:
-            if rid == self.primary_id:
-                return pos, load
+    def _get_robot_data(self, state, rid=None):
+        target_id = rid if rid is not None else self.primary_id
+        for r_id, pos, load in state[0]:
+            if r_id == target_id: return pos, load
         return None, 0
 
     def _is_pos_occupied(self, state, target_pos):
@@ -32,121 +37,236 @@ class Controller:
             if pos == target_pos: return True
         return False
 
-    def _calculate_sub_path(self, state):
+    def _select_targets(self, state, steps_remaining):
         p_pos, p_load = self._get_robot_data(state)
-        plants_t = state[1]
+        plants_dict = dict(state[1])
+        budget = steps_remaining * self.MAX_PROB
         
-        best_ratio, best_plant_pos = -1, None
-        for pos, need in plants_t:
-            if need > 0:
-                dist = abs(pos[0]-p_pos[0]) + abs(pos[1]-p_pos[1])
-                ratio = need / (dist + 1)
-                if ratio > best_ratio:
-                    best_ratio, best_plant_pos = ratio, pos
+        selected_targets = {}
+        curr_pos = p_pos
+        candidate_plants = {pos: need for pos, need in plants_dict.items() if need > 0}
+        
+        while budget > 0 and candidate_plants:
+            best_score = -1
+            best_plant = None
+            best_dist = 0
+            for pos, need in candidate_plants.items():
+                dist = abs(pos[0] - curr_pos[0]) + abs(pos[1] - curr_pos[1])
+                score = need / (dist + 1)
+                if score > best_score:
+                    best_score, best_plant, best_dist = score, pos, dist
+            
+            if best_plant and best_dist <= budget:
+                selected_targets[best_plant] = candidate_plants[best_plant]
+                budget -= best_dist
+                curr_pos = best_plant
+                del candidate_plants[best_plant]
+            else:
+                break
+        return selected_targets
 
-        if not best_plant_pos: return [], None
-
+    def _solve_problem(self, state, targets_dict, algorithm):
+        p_pos, p_load = self._get_robot_data(state)
         sub_prob_dict = {
             "Size": (self.rows, self.cols), 
             "Walls": list(self.walls),
             "Taps": dict(state[2]), 
-            "Plants": {best_plant_pos: dict(plants_t)[best_plant_pos]},
+            "Plants": targets_dict,
             "Robots": {self.primary_id: (p_pos[0], p_pos[1], p_load, self.capacities[self.primary_id])}
         }
-        
         try:
             p = WateringProblem(sub_prob_dict)
-            result = astar_search(p, p.h_astar)
+            result = greedy_best_first_graph_search(p, p.h_astar) if algorithm == 'gbfs' else astar_search(p, p.h_astar)
             node = result[0] if isinstance(result, tuple) else result
             if node:
                 actions = node.solution() if hasattr(node, 'solution') else [n.action for n in node.path() if n.action]
                 clean = ["".join(filter(str.isalpha, str(a).split('{')[0].split('(')[0])).upper() for a in actions]
                 
-                # Check if first action is valid from current pos to determine stack order
-                is_start_first = False
+                # Check path direction
                 if clean:
                     act = clean[0]
+                    r, c = p_pos
+                    is_start_first = False
                     if act in ["UP", "DOWN", "LEFT", "RIGHT"]:
-                        r, c = p_pos
                         tr = (r-1, c) if act == "UP" else (r+1, c) if act == "DOWN" else (r, c-1) if act == "LEFT" else (r, c+1)
                         if 0 <= tr[0] < self.rows and 0 <= tr[1] < self.cols and tr not in self.walls:
                             is_start_first = True
-                    elif (act == "LOAD" and p_pos in dict(state[2])) or (act == "POUR" and p_pos in dict(state[1])):
+                    elif (act == "LOAD" and p_pos in dict(state[2])) or (act == "POUR" and p_pos in targets_dict):
                         is_start_first = True
-
-                if is_start_first: clean = clean[::-1]
+                    if not is_start_first: clean = clean[::-1]
                 
-                return clean, best_plant_pos
-        except:
-            pass
-        return [], None
+                # IMPORTANT: Standardize stack to contain full ACTION(RID) strings
+                return [f"{a}({self.primary_id})" for a in clean]
+        except: pass
+        return []
+
+    def _calculate_sub_path(self, state, steps_remaining, algorithm):
+        targets = self._select_targets(state, steps_remaining)
+        if not targets: return []
+        return self._solve_problem(state, targets, algorithm)
+
+    def recognize_and_fix_fail(self, last_state, last_action, current_state):
+        if not last_action or last_action == "RESET":
+            return None
+        
+        act_name = last_action.split('(')[0].upper()
+        rid = self.primary_id
+        p_prev, l_prev = self._get_robot_data(last_state)
+        p_curr, l_curr = self._get_robot_data(current_state)
+        
+        # --- Movement ---
+        if act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            r, c = p_prev
+            target_pos = p_prev
+            if act_name == "UP": target_pos = (r-1, c)
+            elif act_name == "DOWN": target_pos = (r+1, c)
+            elif act_name == "LEFT": target_pos = (r, c-1)
+            elif act_name == "RIGHT": target_pos = (r, c+1)
+
+            if p_curr == target_pos: return None
+            if p_curr == p_prev: return last_action # Stay
+            
+            # Drift Correction
+            cr, cc = p_curr
+            pr, pc = p_prev
+            if cr < pr: return f"DOWN({rid})"
+            if cr > pr: return f"UP({rid})"
+            if cc < pc: return f"RIGHT({rid})"
+            if cc > pc: return f"LEFT({rid})"
+
+        # --- Load ---
+        elif act_name == "LOAD":
+            if l_curr <= l_prev:
+                # If we failed to load, check if we are even at a tap anymore
+                if p_curr not in dict(current_state[2]):
+                    return "CLEAR_STACK" # Signal to re-plan
+                return last_action
+        
+        # --- Pour ---
+        elif act_name == "POUR":
+            if l_curr >= l_prev:
+                # If we failed to pour, check if we are empty or not at a plant
+                plants_dict = dict(current_state[1])
+                if l_curr == 0 or p_curr not in plants_dict or plants_dict[p_curr] == 0:
+                    return "CLEAR_STACK" # Signal to re-plan
+                return last_action
+
+        return None
+
+    def recognize_and_fix_blocking_robot(self, state, next_action):
+        """
+        Moves a blocking robot to a tile that doesn't interfere with 
+        the primary robot's immediate or next-step destination.
+        """
+        p_pos, _ = self._get_robot_data(state)
+        
+        def get_target(start_pos, act_str):
+            name = act_str.split('(')[0].upper()
+            r, c = start_pos
+            if name == "UP": return (r-1, c)
+            if name == "DOWN": return (r+1, c)
+            if name == "LEFT": return (r, c-1)
+            if name == "RIGHT": return (r, c+1)
+            return start_pos
+
+        # 1. Target of the IMMEDIATE action
+        immediate_target = get_target(p_pos, next_action)
+        if immediate_target == p_pos:
+            return None
+
+        # 2. Target of the NEXT action (to avoid moving blocker into our future path)
+        future_target = None
+        if len(self.action_stack) > 1:
+            future_target = get_target(immediate_target, self.action_stack[1])
+
+        # Find the blocker
+        for rid, pos, _ in state[0]:
+            if pos == immediate_target and rid != self.primary_id:
+                # Valid moves for blocker
+                for dr, dc, m in [(-1, 0, "UP"), (1, 0, "DOWN"), (0, -1, "LEFT"), (0, 1, "RIGHT")]:
+                    nr, nc = pos[0] + dr, pos[1] + dc
+                    
+                    # Boundary and Wall Check
+                    if 0 <= nr < self.rows and 0 <= nc < self.cols and (nr, nc) not in self.walls:
+                        # Occupancy Check
+                        if not self._is_pos_occupied(state, (nr, nc)):
+                            # HEURISTIC: Don't move to where Primary is, where it's going now, 
+                            # or where it's going next.
+                            forbidden = {p_pos, immediate_target, future_target}
+                            if (nr, nc) not in forbidden:
+                                return f"{m}({rid})"
+                
+                # If we couldn't find a "perfect" spot, try any spot that isn't the immediate_target or p_pos
+                for dr, dc, m in [(-1, 0, "UP"), (1, 0, "DOWN"), (0, -1, "LEFT"), (0, 1, "RIGHT")]:
+                    nr, nc = pos[0] + dr, pos[1] + dc
+                    if 0 <= nr < self.rows and 0 <= nc < self.cols and (nr, nc) not in self.walls:
+                        if not self._is_pos_occupied(state, (nr, nc)) and (nr, nc) != p_pos and (nr, nc) != immediate_target:
+                            return f"{m}({rid})"
+
+                return "RESET"
+        return None
 
     def choose_next_action(self, state):
-        curr_pos, curr_load = self._get_robot_data(state)
-        plants_dict = dict(state[1])
-        total_need = state[3]
+        cur_need = state[3]
+        steps_remaining = self.game.get_max_steps() - self.game.get_current_steps()
+        reset_flag = False
 
-        if total_need == 0:
+        # 1. Reset logic
+        if self.last_state and cur_need > self.last_state[3]:
+            self.action_stack = []
+            reset_flag = True
 
-            return "RESET"
-
-        # 1. Failure Check: If the last action actually worked, pop it from stack
-        if self.last_state_check:
-            l_pos, l_load, l_act = self.last_state_check
-            success = True
-            if l_act in ["UP", "DOWN", "LEFT", "RIGHT"] and curr_pos == l_pos:
-                success = False
-            elif l_act == "LOAD" and curr_load == l_load:
-                success = False
-            
-            if success and self.action_stack:
-                self.action_stack.pop()
-
-        # 2. Planning
-        # Re-plan only if stack is empty OR current target is already satisfied
-        if not self.action_stack or (self.current_target_plant and plants_dict.get(self.current_target_plant, 0) == 0):
-            self.action_stack, self.current_target_plant = self._calculate_sub_path(state)
+        # 2. Planning logic
+        if not self.action_stack:
+            if not self.best_Astar_subpath:
+                self.action_stack = self._calculate_sub_path(state, steps_remaining, 'astar') 
+                self.best_Astar_subpath = self.action_stack.copy()
+            elif reset_flag:
+                if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
+                    self.action_stack = self.best_Astar_subpath
+                else:
+                    self.action_stack = self._calculate_sub_path(state, steps_remaining, 'gbfs') 
             if not self.action_stack: return "RESET"
 
-        # 3. Validation
-        act = self.action_stack[-1]
+        # 3. FAILURE HANDLING (Post-Execution Check)
+        if not reset_flag and self.last_action and self.last_state:
+            fix_action = self.recognize_and_fix_fail(self.last_state, self.last_action, state)
+            if fix_action:
+                return fix_action # Retry/Drift recovery
 
-        # debug
-        # print(f"\nStack: {list(reversed(self.action_stack))}", end=" |", flush=True)
+        # 4. PRE-EXECUTION SAFETY CHECK
+        # We peek at the next action and check if it's actually legal right now
+        next_action_str = self.action_stack[0]
+        act_name = next_action_str.split('(')[0].upper()
+        p_pos, p_load = self._get_robot_data(state)
         
-        # Illegal check
-        if (act == "POUR" and (curr_load <= 0 or curr_pos not in plants_dict)) or \
-           (act == "LOAD" and curr_pos not in dict(state[2])):
-            self.action_stack = []
-            return "RESET"
-
-        # 4. Movement & Collision
-        if act in ["UP", "DOWN", "LEFT", "RIGHT"]:
-            r, c = curr_pos
-            target = (r-1, c) if act == "UP" else (r+1, c) if act == "DOWN" else (r, c-1) if act == "LEFT" else (r, c+1)
-            
-            if not (0 <= target[0] < self.rows and 0 <= target[1] < self.cols) or target in self.walls:
+        if act_name == "POUR":
+            plants_dict = dict(state[1])
+            # If empty OR not at a plant OR plant doesn't need water -> REPLAN
+            if p_load == 0 or p_pos not in plants_dict or plants_dict[p_pos] == 0:
+                self.action_stack = []
+                return "RESET" # Or call planning logic directly
+        
+        elif act_name == "LOAD":
+            # If at capacity OR not at a tap -> REPLAN
+            if p_load >= self.capacities[self.primary_id] or p_pos not in dict(state[2]):
                 self.action_stack = []
                 return "RESET"
 
-            if self._is_pos_occupied(state, target):
-                # Try to move blocker
-                for rid, pos, _ in state[0]:
-                    if pos == target and rid != self.primary_id:
-                        for dr, dc, m in [(-1,0,"UP"),(1,0,"DOWN"),(0,-1,"LEFT"),(0,1,"RIGHT")]:
-                            if m in self.action_stack[1]: 
-                                continue
-                            nr, nc = pos[0]+dr, pos[1]+dc
-                            if 0<=nr<self.rows and 0<=nc<self.cols and (nr,nc) not in self.walls and not self._is_pos_occupied(state, (nr,nc)):
-                                return f"{m}({rid})"
-                # If cannot move blocker, RESET to try again or pathfind elsewhere
+        # 5. BLOCKER HANDLING
+        unblock_action = self.recognize_and_fix_blocking_robot(state, next_action_str)
+        if unblock_action:
+            if unblock_action == "RESET":
                 self.action_stack = []
                 return "RESET"
+            return unblock_action
 
-        # 5. Final Execution
-        self.last_state_check = (curr_pos, curr_load, act)
-        return f"{act}({self.primary_id})"
-
+        # 6. FINAL EXECUTION
+        action = self.action_stack.pop(0)
+        self.last_state = state
+        self.last_action = action
+        return action
+    
 class Problem:
     """The abstract class for a formal problem.  You should subclass this and
     implement the method successor, and possibly __init__, goal_test, and
