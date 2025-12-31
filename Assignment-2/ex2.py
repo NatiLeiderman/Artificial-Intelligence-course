@@ -17,8 +17,7 @@ class Controller:
         for p in probs.values():
             if p > self.MAX_PROB:
                 self.MAX_PROB = p
-        
-        if self.MAX_PROB == 0: self.MAX_PROB = 1.0
+
         self.primary_id = max(probs, key=lambda rid: (probs[rid], self.capacities.get(rid, 0)))
         
         self.action_stack = []
@@ -39,31 +38,59 @@ class Controller:
 
     def _select_targets(self, state, steps_remaining):
         p_pos, p_load = self._get_robot_data(state)
-        plants_dict = dict(state[1])
-        budget = steps_remaining * self.MAX_PROB
+        plants_list = state[1]
+        taps_dict = dict(state[2])
         
-        selected_targets = {}
-        curr_pos = p_pos
-        candidate_plants = {pos: need for pos, need in plants_dict.items() if need > 0}
-        
-        while budget > 0 and candidate_plants:
-            best_score = -1
-            best_plant = None
-            best_dist = 0
-            for pos, need in candidate_plants.items():
-                dist = abs(pos[0] - curr_pos[0]) + abs(pos[1] - curr_pos[1])
-                score = need / (dist + 1)
+        # 1. SMALL WORLD CHECK (rows * cols <= 16)
+        # In small worlds, return all plants to allow full-path planning
+        if self.rows * self.cols <= 16:
+            return {pos: need for pos, need in plants_list if need > 0}
+
+        # 2. LARGE WORLD STRATEGY: Choose one plant based on R^2 / (D1 + D2)
+        best_score = -1
+        best_plant_pos = None
+        plant_rewards = self.problem_desc.get("plants_reward", {})
+
+        # Internal helper for wall-aware distance
+        def get_real_dist(start, end):
+            if start == end: return 0
+            queue = [(start, 0)]
+            visited = {start}
+            while queue:
+                (r, c), dist = queue.pop(0)
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if (nr, nc) == end: return dist + 1
+                    if (0 <= nr < self.rows and 0 <= nc < self.cols and 
+                        (nr, nc) not in self.walls and (nr, nc) not in visited):
+                        visited.add((nr, nc))
+                        queue.append(((nr, nc), dist + 1))
+            return 999  # Path is blocked
+
+        for pos, need in plants_list:
+            if need > 0:
+                # Calculate Reward (R)
+                rewards = plant_rewards.get(pos, [1])
+                reward_val = sum(rewards) / len(rewards)
+                
+                # D1: Dist from Robot to Plant
+                d1 = get_real_dist(p_pos, pos)
+                if d1 >= 999: continue # Ignore unreachable plants
+                
+                # D2: Dist from Plant to nearest Tap
+                d2 = min([get_real_dist(pos, tap) for tap in taps_dict.keys()] + [999])
+                
+                # Formula: R^2 / (D1 + D2 + 1)
+                score = (reward_val ** 2) / (d1 + d2 + 1)
+                
                 if score > best_score:
-                    best_score, best_plant, best_dist = score, pos, dist
-            
-            if best_plant and best_dist <= budget:
-                selected_targets[best_plant] = candidate_plants[best_plant]
-                budget -= best_dist
-                curr_pos = best_plant
-                del candidate_plants[best_plant]
-            else:
-                break
-        return selected_targets
+                    best_score = score
+                    best_plant_pos = pos
+        
+        if best_plant_pos:
+            return {best_plant_pos: dict(plants_list)[best_plant_pos]}
+        
+        return {}
 
     def _solve_problem(self, state, targets_dict, algorithm):
         p_pos, p_load = self._get_robot_data(state)
@@ -100,7 +127,7 @@ class Controller:
         except: pass
         return []
 
-    def _calculate_sub_path(self, state, steps_remaining, algorithm):
+    def _calculate_optimal_path(self, state, steps_remaining, algorithm):
         targets = self._select_targets(state, steps_remaining)
         if not targets: return []
         return self._solve_problem(state, targets, algorithm)
@@ -114,7 +141,6 @@ class Controller:
         p_prev, l_prev = self._get_robot_data(last_state)
         p_curr, l_curr = self._get_robot_data(current_state)
         
-        # --- Movement ---
         if act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
             r, c = p_prev
             target_pos = p_prev
@@ -125,14 +151,23 @@ class Controller:
 
             if p_curr == target_pos: return None
             if p_curr == p_prev: return last_action # Stay
-            
+
             # Drift Correction
             cr, cc = p_curr
             pr, pc = p_prev
-            if cr < pr: return f"DOWN({rid})"
-            if cr > pr: return f"UP({rid})"
-            if cc < pc: return f"RIGHT({rid})"
-            if cc > pc: return f"LEFT({rid})"
+            fix_move = None
+            target_sq = None
+
+            if cr < pr: fix_move, target_sq = f"DOWN({rid})", (cr+1, cc)
+            elif cr > pr: fix_move, target_sq = f"UP({rid})", (cr-1, cc)
+            elif cc < pc: fix_move, target_sq = f"RIGHT({rid})", (cr, cc+1)
+            elif cc > pc: fix_move, target_sq = f"LEFT({rid})", (cr, cc-1)
+
+            # WALL CHECK for the fix move
+            if fix_move and target_sq:
+                if target_sq in self.walls:
+                    return "CLEAR_STACK" # Don't walk into a wall to fix drift
+                return fix_move
 
         # --- Load ---
         elif act_name == "LOAD":
@@ -214,23 +249,33 @@ class Controller:
         # 1. Reset logic
         if self.last_state and cur_need > self.last_state[3]:
             self.action_stack = []
+            self.last_action = None
+            self.last_state = None
             reset_flag = True
 
         # 2. Planning logic
         if not self.action_stack:
             if not self.best_Astar_subpath:
-                self.action_stack = self._calculate_sub_path(state, steps_remaining, 'astar') 
+                self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar') 
                 self.best_Astar_subpath = self.action_stack.copy()
             elif reset_flag:
                 if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
-                    self.action_stack = self.best_Astar_subpath
+                    self.action_stack = self.best_Astar_subpath.copy()
                 else:
-                    self.action_stack = self._calculate_sub_path(state, steps_remaining, 'gbfs') 
-            if not self.action_stack: return "RESET"
+                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs') 
+            if not self.action_stack: 
+                return "RESET"
 
         # 3. FAILURE HANDLING (Post-Execution Check)
         if not reset_flag and self.last_action and self.last_state:
             fix_action = self.recognize_and_fix_fail(self.last_state, self.last_action, state)
+            
+            if fix_action == "CLEAR_STACK":
+                self.action_stack = []
+                # Don't return "CLEAR_STACK"! Instead, tell the robot to 
+                # re-plan or just return "RESET" which the game understands.
+                return "RESET" 
+            
             if fix_action:
                 return fix_action # Retry/Drift recovery
 
@@ -250,6 +295,20 @@ class Controller:
         elif act_name == "LOAD":
             # If at capacity OR not at a tap -> REPLAN
             if p_load >= self.capacities[self.primary_id] or p_pos not in dict(state[2]):
+                self.action_stack = []
+                return "RESET"
+                
+        if act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            r, c = p_pos
+            target_sq = p_pos
+            if act_name == "UP": target_sq = (r-1, c)
+            elif act_name == "DOWN": target_sq = (r+1, c)
+            elif act_name == "LEFT": target_sq = (r, c-1)
+            elif act_name == "RIGHT": target_sq = (r, c+1)
+            
+            # If the next move in our plan is a wall, the plan is garbage. 
+            # Wipe it and force a re-plan from our current actual position.
+            if target_sq in self.walls:
                 self.action_stack = []
                 return "RESET"
 
@@ -438,7 +497,7 @@ class WateringProblem(Problem):
             action_performed = False
 
             # LOAD action
-            if robot_pos in self.tap_index_map and carry < capacity:
+            if robot_pos in self.tap_index_map and carry < capacity and carry < sum(p for p in plants):
                 tap_index = self.tap_index_map[robot_pos]
                 cur_tap_amount = taps[tap_index]
                 
