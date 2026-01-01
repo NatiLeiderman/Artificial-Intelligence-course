@@ -1,5 +1,5 @@
 from __future__ import generators
-from utils import *
+
 import math, random, sys, time, bisect, string
 import operator, copy, os.path, inspect
 import ext_plant
@@ -24,6 +24,9 @@ class Controller:
         self.best_Astar_subpath = []
         self.last_state = None
         self.last_action = None
+
+        self.extra_load_count = 0
+        self.extra_pour_count = 0
 
     def _get_robot_data(self, state, rid=None):
         target_id = rid if rid is not None else self.primary_id
@@ -87,6 +90,10 @@ class Controller:
                     best_score = score
                     best_plant_pos = pos
         
+        # Extra load
+        self.extra_load_count = (1 - self.MAX_PROB) * self.problem_desc["Plants"][best_plant_pos]
+        self.extra_pour_count = self.extra_load_count
+        
         if best_plant_pos:
             return {best_plant_pos: dict(plants_list)[best_plant_pos]}
         
@@ -101,15 +108,26 @@ class Controller:
             "Plants": targets_dict,
             "Robots": {self.primary_id: (p_pos[0], p_pos[1], p_load, self.capacities[self.primary_id])}
         }
+        
+        # 1. CALCULATE REDUNDANCY
+        # How many extra attempts do we need?
+        # If probability is 0.8, risk is 0.2. We add actions proportional to risk.
+        risk = 1.0 - self.MAX_PROB
+        extra_ops = 0
+        if risk > 0 and targets_dict:
+            # Simple heuristic: 1 extra op for every 20% risk, minimum 1 if risk exists
+            extra_ops = int(risk * 5) + 1 
+
         try:
             p = WateringProblem(sub_prob_dict)
             result = greedy_best_first_graph_search(p, p.h_astar) if algorithm == 'gbfs' else astar_search(p, p.h_astar)
             node = result[0] if isinstance(result, tuple) else result
+            
             if node:
                 actions = node.solution() if hasattr(node, 'solution') else [n.action for n in node.path() if n.action]
                 clean = ["".join(filter(str.isalpha, str(a).split('{')[0].split('(')[0])).upper() for a in actions]
                 
-                # Check path direction
+                # Fix path direction if needed (your existing logic)
                 if clean:
                     act = clean[0]
                     r, c = p_pos
@@ -122,8 +140,20 @@ class Controller:
                         is_start_first = True
                     if not is_start_first: clean = clean[::-1]
                 
-                # IMPORTANT: Standardize stack to contain full ACTION(RID) strings
-                return [f"{a}({self.primary_id})" for a in clean]
+                # 2. INJECT EXTRA ACTIONS INTO THE PLAN
+                final_actions = []
+                for act in clean:
+                    final_actions.append(act)
+                    if act == "LOAD":
+                        # Add extra loads immediately after the main load
+                        for _ in range(extra_ops):
+                            final_actions.append("LOAD")
+                    elif act == "POUR":
+                        # Add extra pours immediately after the main pour
+                        for _ in range(extra_ops):
+                            final_actions.append("POUR")
+
+                return [f"{a}({self.primary_id})" for a in final_actions]
         except: pass
         return []
 
@@ -141,6 +171,7 @@ class Controller:
         p_prev, l_prev = self._get_robot_data(last_state)
         p_curr, l_curr = self._get_robot_data(current_state)
         
+        # 1. MOVEMENT FAILURES (Drift / Blocked)
         if act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
             r, c = p_prev
             target_pos = p_prev
@@ -149,8 +180,8 @@ class Controller:
             elif act_name == "LEFT": target_pos = (r, c-1)
             elif act_name == "RIGHT": target_pos = (r, c+1)
 
-            if p_curr == target_pos: return None
-            if p_curr == p_prev: return last_action # Stay
+            if p_curr == target_pos: return None # Success
+            if p_curr == p_prev: return last_action # Blocked? Retry.
 
             # Drift Correction
             cr, cc = p_curr
@@ -163,27 +194,23 @@ class Controller:
             elif cc < pc: fix_move, target_sq = f"RIGHT({rid})", (cr, cc+1)
             elif cc > pc: fix_move, target_sq = f"LEFT({rid})", (cr, cc-1)
 
-            # WALL CHECK for the fix move
             if fix_move and target_sq:
                 if target_sq in self.walls:
-                    return "CLEAR_STACK" # Don't walk into a wall to fix drift
+                    return "CLEAR_STACK"
                 return fix_move
 
-        # --- Load ---
+        # 2. ACTION FAILURES (Only retry if it FAILED)
         elif act_name == "LOAD":
+            # Only retry if load did NOT increase
             if l_curr <= l_prev:
-                # If we failed to load, check if we are even at a tap anymore
-                if p_curr not in dict(current_state[2]):
-                    return "CLEAR_STACK" # Signal to re-plan
+                if p_curr not in dict(current_state[2]): return "CLEAR_STACK"
                 return last_action
         
-        # --- Pour ---
         elif act_name == "POUR":
+            # Only retry if load did NOT decrease
             if l_curr >= l_prev:
-                # If we failed to pour, check if we are empty or not at a plant
                 plants_dict = dict(current_state[1])
-                if l_curr == 0 or p_curr not in plants_dict or plants_dict[p_curr] == 0:
-                    return "CLEAR_STACK" # Signal to re-plan
+                if l_curr == 0 or p_curr not in plants_dict: return "CLEAR_STACK"
                 return last_action
 
         return None
@@ -246,59 +273,84 @@ class Controller:
         steps_remaining = self.game.get_max_steps() - self.game.get_current_steps()
         reset_flag = False
 
-        # 1. Reset logic
+        # 1. RESET LOGIC: Wipe stack if game state indicates a fresh start or error
         if self.last_state and cur_need > self.last_state[3]:
             self.action_stack = []
             self.last_action = None
             self.last_state = None
             reset_flag = True
 
-        # 2. Planning logic
+        # 2. PLANNING LOGIC: Generate a new path if the stack is empty
         if not self.action_stack:
             if not self.best_Astar_subpath:
                 self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar') 
                 self.best_Astar_subpath = self.action_stack.copy()
             elif reset_flag:
+                # Decide whether to reuse the cached best path or re-calculate
                 if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
                     self.action_stack = self.best_Astar_subpath.copy()
                 else:
-                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs') 
+                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar') 
+            
             if not self.action_stack: 
                 return "RESET"
 
-        # 3. FAILURE HANDLING (Post-Execution Check)
+        # 3. FAILURE HANDLING: Check if the previous action actually worked
         if not reset_flag and self.last_action and self.last_state:
             fix_action = self.recognize_and_fix_fail(self.last_state, self.last_action, state)
-            
             if fix_action == "CLEAR_STACK":
                 self.action_stack = []
-                # Don't return "CLEAR_STACK"! Instead, tell the robot to 
-                # re-plan or just return "RESET" which the game understands.
                 return "RESET" 
-            
             if fix_action:
-                return fix_action # Retry/Drift recovery
+                return fix_action 
 
-        # 4. PRE-EXECUTION SAFETY CHECK
-        # We peek at the next action and check if it's actually legal right now
+        # 4. PRE-EXECUTION SAFETY & REDUNDANCY CHECK
+        # This section "cleans" the stack of actions that are no longer necessary
         next_action_str = self.action_stack[0]
         act_name = next_action_str.split('(')[0].upper()
         p_pos, p_load = self._get_robot_data(state)
+        plants_dict = dict(state[1])
         
-        if act_name == "POUR":
-            plants_dict = dict(state[1])
-            # If empty OR not at a plant OR plant doesn't need water -> REPLAN
-            if p_load == 0 or p_pos not in plants_dict or plants_dict[p_pos] == 0:
-                self.action_stack = []
-                return "RESET" # Or call planning logic directly
-        
-        elif act_name == "LOAD":
-            # If at capacity OR not at a tap -> REPLAN
-            if p_load >= self.capacities[self.primary_id] or p_pos not in dict(state[2]):
+        # --- SMART LOAD CHECK ---
+        if act_name == "LOAD":
+            # Rule A: Skip if already at maximum capacity
+            if p_load >= self.capacities[self.primary_id]:
+                self.action_stack.pop(0)
+                return self.choose_next_action(state)
+            
+            # Rule B: Skip if current load is sufficient for the target's need
+            if plants_dict:
+                # We look for the maximum need currently on the board
+                # (Safety buffer: +1 to account for potential failed drops)
+                max_required = max(plants_dict.values()) + 1
+                if p_load >= max_required:
+                    print(f"Skipping LOAD: load {p_load} is enough for max need {max_required}")
+                    self.action_stack.pop(0)
+                    return self.choose_next_action(state)
+            
+            # Rule C: If not at a tap, the plan to LOAD is invalid
+            if p_pos not in dict(state[2]):
                 self.action_stack = []
                 return "RESET"
-                
-        if act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
+
+        # --- SMART POUR CHECK ---
+        elif act_name == "POUR":
+            plant_missing = p_pos not in plants_dict
+            plant_need = plants_dict.get(p_pos, 0)
+            
+            # Check if we should skip the pour
+            is_empty = (p_load == 0)
+            is_satisfied = plant_missing or (plant_need == 0)
+            
+            if is_empty or is_satisfied:
+                print(f"Skipping redundant POUR (Plant missing/done: {is_satisfied})")
+                self.action_stack.pop(0)
+                if not self.action_stack:
+                    return "RESET"
+                return self.choose_next_action(state)
+
+        # --- MOVEMENT CHECK ---
+        elif act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
             r, c = p_pos
             target_sq = p_pos
             if act_name == "UP": target_sq = (r-1, c)
@@ -306,13 +358,11 @@ class Controller:
             elif act_name == "LEFT": target_sq = (r, c-1)
             elif act_name == "RIGHT": target_sq = (r, c+1)
             
-            # If the next move in our plan is a wall, the plan is garbage. 
-            # Wipe it and force a re-plan from our current actual position.
             if target_sq in self.walls:
                 self.action_stack = []
                 return "RESET"
 
-        # 5. BLOCKER HANDLING
+        # 5. BLOCKER HANDLING: Move other robots out of the way
         unblock_action = self.recognize_and_fix_blocking_robot(state, next_action_str)
         if unblock_action:
             if unblock_action == "RESET":
@@ -320,7 +370,7 @@ class Controller:
                 return "RESET"
             return unblock_action
 
-        # 6. FINAL EXECUTION
+        # 6. FINAL EXECUTION: Pop the action and save the state for the next turn
         action = self.action_stack.pop(0)
         self.last_state = state
         self.last_action = action
