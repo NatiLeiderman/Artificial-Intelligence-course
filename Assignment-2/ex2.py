@@ -63,7 +63,6 @@ class Controller:
             for p in plants_list:
                 plant_pos = p[0]
                 plant_reward = self.mean_rewards[plant_pos]
-
                 if plant_reward > average_reward * 1.5:
                     if plant_reward > max_plant[1]:
                         best_plant_flag = True
