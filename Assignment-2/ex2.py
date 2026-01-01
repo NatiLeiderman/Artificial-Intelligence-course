@@ -11,6 +11,8 @@ class Controller:
         self.rows, self.cols = self.problem_desc["Size"]
         self.walls = set(self.problem_desc["Walls"])
         self.capacities = game.get_capacities()
+        self.active_robots = {}
+        self.target_plants = {}
         
         probs = self.problem_desc.get("robot_chosen_action_prob", {})
         self.MAX_PROB = 0
@@ -127,7 +129,7 @@ class Controller:
                 actions = node.solution() if hasattr(node, 'solution') else [n.action for n in node.path() if n.action]
                 clean = ["".join(filter(str.isalpha, str(a).split('{')[0].split('(')[0])).upper() for a in actions]
                 
-                # Fix path direction if needed (your existing logic)
+                # Fix path direction if needed
                 if clean:
                     act = clean[0]
                     r, c = p_pos
@@ -159,6 +161,7 @@ class Controller:
 
     def _calculate_optimal_path(self, state, steps_remaining, algorithm):
         targets = self._select_targets(state, steps_remaining)
+        self.target_plants = targets.copy()
         if not targets: return []
         return self._solve_problem(state, targets, algorithm)
 
@@ -274,7 +277,7 @@ class Controller:
         reset_flag = False
 
         # 1. RESET LOGIC: Wipe stack if game state indicates a fresh start or error
-        if self.last_state and cur_need > self.last_state[3]:
+        if (self.last_state and cur_need > self.last_state[3]) or self.last_action == "RESET":
             self.action_stack = []
             self.last_action = None
             self.last_state = None
@@ -290,9 +293,11 @@ class Controller:
                 if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
                     self.action_stack = self.best_Astar_subpath.copy()
                 else:
-                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar') 
+                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs') 
             
-            if not self.action_stack: 
+            if not self.action_stack:
+                self.last_action = "RESET"
+                print("reset no plan")
                 return "RESET"
 
         # 3. FAILURE HANDLING: Check if the previous action actually worked
@@ -300,6 +305,8 @@ class Controller:
             fix_action = self.recognize_and_fix_fail(self.last_state, self.last_action, state)
             if fix_action == "CLEAR_STACK":
                 self.action_stack = []
+                self.last_action = "RESET"
+                print("reset fail")
                 return "RESET" 
             if fix_action:
                 return fix_action 
@@ -322,7 +329,8 @@ class Controller:
             if plants_dict:
                 # We look for the maximum need currently on the board
                 # (Safety buffer: +1 to account for potential failed drops)
-                max_required = max(plants_dict.values()) + 1
+                max_factor = max(self.target_plants.values())
+                max_required = max_factor * (1 - self.MAX_PROB) + max_factor
                 if p_load >= max_required:
                     print(f"Skipping LOAD: load {p_load} is enough for max need {max_required}")
                     self.action_stack.pop(0)
@@ -331,6 +339,8 @@ class Controller:
             # Rule C: If not at a tap, the plan to LOAD is invalid
             if p_pos not in dict(state[2]):
                 self.action_stack = []
+                self.last_action = "RESET"
+                print("reset load")
                 return "RESET"
 
         # --- SMART POUR CHECK ---
@@ -343,9 +353,10 @@ class Controller:
             is_satisfied = plant_missing or (plant_need == 0)
             
             if is_empty or is_satisfied:
-                print(f"Skipping redundant POUR (Plant missing/done: {is_satisfied})")
                 self.action_stack.pop(0)
                 if not self.action_stack:
+                    self.last_action = "RESET"
+                    print("reset pour")
                     return "RESET"
                 return self.choose_next_action(state)
 
@@ -360,6 +371,8 @@ class Controller:
             
             if target_sq in self.walls:
                 self.action_stack = []
+                self.last_action = "RESET"
+                print("reset walls")
                 return "RESET"
 
         # 5. BLOCKER HANDLING: Move other robots out of the way
@@ -367,6 +380,8 @@ class Controller:
         if unblock_action:
             if unblock_action == "RESET":
                 self.action_stack = []
+                self.last_action = "RESET"
+                print("reset unblock")
                 return "RESET"
             return unblock_action
 
@@ -374,6 +389,7 @@ class Controller:
         action = self.action_stack.pop(0)
         self.last_state = state
         self.last_action = action
+        print(action)
         return action
     
 class Problem:
