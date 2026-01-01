@@ -1,6 +1,6 @@
 from __future__ import generators
 
-import math, random, sys, time, bisect, string
+import math, random, sys, re, bisect, string
 import operator, copy, os.path, inspect
 import ext_plant
 
@@ -13,6 +13,13 @@ class Controller:
         self.capacities = game.get_capacities()
         self.active_robots = {}
         self.target_plants = {}
+        self.is_small_world = self.rows * self.cols <= 9
+
+        raw_rewards = self.problem_desc.get("plants_reward", {})
+        self.mean_rewards = {
+            pos: (sum(plants) / len(plants)) 
+            for pos, plants in raw_rewards.items()
+        }
         
         probs = self.problem_desc.get("robot_chosen_action_prob", {})
         self.MAX_PROB = 0
@@ -46,10 +53,26 @@ class Controller:
         plants_list = state[1]
         taps_dict = dict(state[2])
         
-        # 1. SMALL WORLD CHECK (rows * cols <= 16)
+        # 1. SMALL WORLD CHECK (rows * cols <= 9)
         # In small worlds, return all plants to allow full-path planning
-        if self.rows * self.cols <= 16:
-            return {pos: need for pos, need in plants_list if need > 0}
+        if self.is_small_world:
+            average_reward = sum(self.mean_rewards.values()) / len(self.mean_rewards)
+            max_plant = ((0,0) , 0)
+            best_plant_flag = False
+
+            for p in plants_list:
+                plant_pos = p[0]
+                plant_reward = self.mean_rewards[plant_pos]
+
+                if plant_reward > average_reward * 1.5:
+                    if plant_reward > max_plant[1]:
+                        best_plant_flag = True
+                        max_plant = p
+
+            if (best_plant_flag):
+                return { max_plant[0] : max_plant[1] }
+            else:    
+                return {pos: need for pos, need in plants_list if need > 0}
 
         # 2. LARGE WORLD STRATEGY: Choose one plant based on R^2 / (D1 + D2)
         best_score = -1
@@ -389,7 +412,6 @@ class Controller:
         action = self.action_stack.pop(0)
         self.last_state = state
         self.last_action = action
-        print(action)
         return action
     
 class Problem:
