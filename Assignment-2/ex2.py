@@ -4,6 +4,8 @@ import math, random, sys, re, bisect, string
 import operator, copy, os.path, inspect
 import ext_plant
 
+id = ["331010090"]
+
 class Controller:
     def __init__(self, game: ext_plant.Game):
         self.game = game
