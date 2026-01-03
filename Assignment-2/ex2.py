@@ -416,8 +416,11 @@ class Controller:
                 combined_plan = self.best_Astar_subpath + new_path
                 combined_reward = self._calculate_plan_value(combined_plan, self.plan_start_state)
                 
+                average_old_reward = old_reward/len(self.best_Astar_subpath)
+                average_new_reward = combined_reward/len(combined_plan)
+                
                 # compare the rewards
-                if combined_reward > (old_reward * 2):
+                if average_new_reward > average_old_reward * 2:
                     self.action_stack = new_path
                     # update the best plan
                     self.best_Astar_subpath.extend(new_path)
