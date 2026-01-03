@@ -527,7 +527,7 @@ problem_new4_version2 = {
     "horizon": 40,
 }
 
-PROBLEM_CONFIG = problem_new3_version1
+PROBLEM_CONFIG = problem_pdf3
 # =============================================================================
 #  THE VISUALIZER CLASS
 # =============================================================================

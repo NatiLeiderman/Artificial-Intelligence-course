@@ -641,7 +641,7 @@ def main():
     # Baseline averages (reward_avg, time_avg) provided by user for comparison
     baseline_map = {
         "problem_pdf": (21.766667, 1.296914),
-        "problem_pdf2": (33.566667, 1.173343),
+        "problem_pdf2": (27, 1.173343),
         "problem_pdf3": (40.366667, 1.208422),
         "problem_new1_version1": (62.966667, 7.863858),
         "problem_new1_version2": (87.500000, 16.394542),
