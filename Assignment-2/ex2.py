@@ -15,25 +15,72 @@ class Controller:
         self.target_plants = {}
         self.is_small_world = self.rows * self.cols <= 9
 
+        # mean rewards calculation
         raw_rewards = self.problem_desc.get("plants_reward", {})
         self.mean_rewards = {
             pos: (sum(plants) / len(plants)) 
             for pos, plants in raw_rewards.items()
         }
         
+        # calculating max probabilty
         probs = self.problem_desc.get("robot_chosen_action_prob", {})
         self.MAX_PROB = 0
         for p in probs.values():
             if p > self.MAX_PROB:
                 self.MAX_PROB = p
 
-        self.primary_id = max(probs, key=lambda rid: (probs[rid], self.capacities.get(rid, 0)))
+        # distance helper for robot selection
+        def get_real_dist(start, end):
+            if start == end: return 0
+            queue = [(start, 0)]
+            visited = {start}
+            while queue:
+                (r, c), dist = queue.pop(0)
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if (nr, nc) == end: return dist + 1
+                    if (0 <= nr < self.rows and 0 <= nc < self.cols and 
+                        (nr, nc) not in self.walls and (nr, nc) not in visited):
+                        visited.add((nr, nc))
+                        queue.append(((nr, nc), dist + 1))
+            return 10000
+
+        # identify the "best" target using find_targets logic
+        current_state = game.get_current_state()
+        taps_dict = dict(current_state[2])
+        best_plant_pos = None
+        highest_target_score = -1
+
+        for pos, need in current_state[1]:
+            if need > 0:
+                reward_val = self.mean_rewards.get(pos, 1)
+                
+                d2 = min([get_real_dist(pos, tap) for tap in taps_dict.keys()] + [999])
+
+                p_score = (reward_val ** 2) / (d2 + 1)
+                if p_score > highest_target_score:
+                    highest_target_score = p_score
+                    best_plant_pos = pos
+
+        # primary robot selection based on probability, capacity, and distance to the identified best plant
+        robot_initial_positions = {r_id: pos for r_id, pos, _ in current_state[0]}
         
+        # robot score calculation
+        def robot_selection_score(rid):
+            p = probs.get(rid, 0)
+            c = self.capacities.get(rid, 0)
+            d1 = get_real_dist(robot_initial_positions.get(rid), best_plant_pos) if best_plant_pos else 0
+            return (p * 100) + (c) - d1
+
+        self.primary_id = max(probs, key=robot_selection_score)
+        
+        # will be used later in planning
         self.action_stack = []
         self.best_Astar_subpath = []
         self.last_state = None
         self.last_action = None
 
+        # for extra loads and pours
         self.extra_load_count = 0
         self.extra_pour_count = 0
 
@@ -53,8 +100,7 @@ class Controller:
         plants_list = state[1]
         taps_dict = dict(state[2])
         
-        # 1. SMALL WORLD CHECK (rows * cols <= 9)
-        # In small worlds, return all plants to allow full-path planning
+        # in smaller world case, we find if its most valuable to water all plants or onl 1
         if self.is_small_world:
             average_reward = sum(self.mean_rewards.values()) / len(self.mean_rewards)
             max_plant = ((0,0) , 0)
@@ -73,12 +119,14 @@ class Controller:
             else:    
                 return {pos: need for pos, need in plants_list if need > 0}
 
-        # 2. LARGE WORLD STRATEGY: Choose one plant based on R^2 / (D1 + D2)
+        # in a larger world senario we use  R^2 / (D1 + D2)
+        # where R is the mean plant reward, D1 is the distance between the chosen robot
+        # and the plant and D2 is the distance between the plant and its closest tap
         best_score = -1
         best_plant_pos = None
         plant_rewards = self.problem_desc.get("plants_reward", {})
 
-        # Internal helper for wall-aware distance
+        # calculating distances with walls included
         def get_real_dist(start, end):
             if start == end: return 0
             queue = [(start, 0)]
@@ -92,29 +140,29 @@ class Controller:
                         (nr, nc) not in self.walls and (nr, nc) not in visited):
                         visited.add((nr, nc))
                         queue.append(((nr, nc), dist + 1))
-            return 999  # Path is blocked
+            return 10000  # no path
 
         for pos, need in plants_list:
             if need > 0:
-                # Calculate Reward (R)
+                # R calculation
                 rewards = plant_rewards.get(pos, [1])
                 reward_val = sum(rewards) / len(rewards)
                 
-                # D1: Dist from Robot to Plant
+                # D1 calculation
                 d1 = get_real_dist(p_pos, pos)
-                if d1 >= 999: continue # Ignore unreachable plants
+                if d1 >= 10000: continue # Ignore unreachable plants
                 
-                # D2: Dist from Plant to nearest Tap
+                # D2 calculation
                 d2 = min([get_real_dist(pos, tap) for tap in taps_dict.keys()] + [999])
                 
-                # Formula: R^2 / (D1 + D2 + 1)
+                # final score
                 score = (reward_val ** 2) / (d1 + d2 + 1)
                 
                 if score > best_score:
                     best_score = score
                     best_plant_pos = pos
         
-        # Extra load
+        # calculating extra loads and pours based on the robots fail probability
         self.extra_load_count = (1 - self.MAX_PROB) * self.problem_desc["Plants"][best_plant_pos]
         self.extra_pour_count = self.extra_load_count
         
@@ -133,16 +181,15 @@ class Controller:
             "Robots": {self.primary_id: (p_pos[0], p_pos[1], p_load, self.capacities[self.primary_id])}
         }
         
-        # 1. CALCULATE REDUNDANCY
-        # How many extra attempts do we need?
-        # If probability is 0.8, risk is 0.2. We add actions proportional to risk.
+        # the risk is the robot's probability to fail
         risk = 1.0 - self.MAX_PROB
         extra_ops = 0
         if risk > 0 and targets_dict:
-            # Simple heuristic: 1 extra op for every 20% risk, minimum 1 if risk exists
+            # 1 extra operation for every 20% risk, minimum 1 if risk exists
             extra_ops = int(risk * 5) + 1 
 
         try:
+            # creating the problem and using ex1 code
             p = WateringProblem(sub_prob_dict)
             result = greedy_best_first_graph_search(p, p.h_astar) if algorithm == 'gbfs' else astar_search(p, p.h_astar)
             node = result[0] if isinstance(result, tuple) else result
@@ -151,7 +198,7 @@ class Controller:
                 actions = node.solution() if hasattr(node, 'solution') else [n.action for n in node.path() if n.action]
                 clean = ["".join(filter(str.isalpha, str(a).split('{')[0].split('(')[0])).upper() for a in actions]
                 
-                # Fix path direction if needed
+                # checking if all actions are legal
                 if clean:
                     act = clean[0]
                     r, c = p_pos
@@ -164,16 +211,17 @@ class Controller:
                         is_start_first = True
                     if not is_start_first: clean = clean[::-1]
                 
-                # 2. INJECT EXTRA ACTIONS INTO THE PLAN
+                # injecting the extra pours and loads, in reality we inject too many but this will be 
+                # ignored thorugh the choose_next_action logic
                 final_actions = []
                 for act in clean:
                     final_actions.append(act)
                     if act == "LOAD":
-                        # Add extra loads immediately after the main load
+                        # adding the extra loads
                         for _ in range(extra_ops):
                             final_actions.append("LOAD")
                     elif act == "POUR":
-                        # Add extra pours immediately after the main pour
+                        # adding the extra pours
                         for _ in range(extra_ops):
                             final_actions.append("POUR")
 
@@ -182,9 +230,11 @@ class Controller:
         return []
 
     def _calculate_optimal_path(self, state, steps_remaining, algorithm):
+        # target selection
         targets = self._select_targets(state, steps_remaining)
         self.target_plants = targets.copy()
         if not targets: return []
+        # running ex1 with only the target plants
         return self._solve_problem(state, targets, algorithm)
 
     def recognize_and_fix_fail(self, last_state, last_action, current_state):
@@ -196,7 +246,7 @@ class Controller:
         p_prev, l_prev = self._get_robot_data(last_state)
         p_curr, l_curr = self._get_robot_data(current_state)
         
-        # 1. MOVEMENT FAILURES (Drift / Blocked)
+        # movement fail handeling
         if act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
             r, c = p_prev
             target_pos = p_prev
@@ -205,10 +255,10 @@ class Controller:
             elif act_name == "LEFT": target_pos = (r, c-1)
             elif act_name == "RIGHT": target_pos = (r, c+1)
 
-            if p_curr == target_pos: return None # Success
-            if p_curr == p_prev: return last_action # Blocked? Retry.
+            if p_curr == target_pos: return None # move succeeded
+            if p_curr == p_prev: return last_action # block case
 
-            # Drift Correction
+            # unwanted move "fix"
             cr, cc = p_curr
             pr, pc = p_prev
             fix_move = None
@@ -224,15 +274,14 @@ class Controller:
                     return "CLEAR_STACK"
                 return fix_move
 
-        # 2. ACTION FAILURES (Only retry if it FAILED)
+        # when fialing load, we just load again
         elif act_name == "LOAD":
-            # Only retry if load did NOT increase
             if l_curr <= l_prev:
                 if p_curr not in dict(current_state[2]): return "CLEAR_STACK"
                 return last_action
         
+        # retry to pour
         elif act_name == "POUR":
-            # Only retry if load did NOT decrease
             if l_curr >= l_prev:
                 plants_dict = dict(current_state[1])
                 if l_curr == 0 or p_curr not in plants_dict: return "CLEAR_STACK"
@@ -241,10 +290,6 @@ class Controller:
         return None
 
     def recognize_and_fix_blocking_robot(self, state, next_action):
-        """
-        Moves a blocking robot to a tile that doesn't interfere with 
-        the primary robot's immediate or next-step destination.
-        """
         p_pos, _ = self._get_robot_data(state)
         
         def get_target(start_pos, act_str):
@@ -256,40 +301,38 @@ class Controller:
             if name == "RIGHT": return (r, c+1)
             return start_pos
 
-        # 1. Target of the IMMEDIATE action
         immediate_target = get_target(p_pos, next_action)
         if immediate_target == p_pos:
             return None
 
-        # 2. Target of the NEXT action (to avoid moving blocker into our future path)
+        # we need the future move in order that the blocking robot will continue to block us afterwards
         future_target = None
         if len(self.action_stack) > 1:
             future_target = get_target(immediate_target, self.action_stack[1])
 
-        # Find the blocker
+        # find the blocker
         for rid, pos, _ in state[0]:
             if pos == immediate_target and rid != self.primary_id:
-                # Valid moves for blocker
+                # checking valid moves for the blocker
                 for dr, dc, m in [(-1, 0, "UP"), (1, 0, "DOWN"), (0, -1, "LEFT"), (0, 1, "RIGHT")]:
                     nr, nc = pos[0] + dr, pos[1] + dc
                     
-                    # Boundary and Wall Check
                     if 0 <= nr < self.rows and 0 <= nc < self.cols and (nr, nc) not in self.walls:
-                        # Occupancy Check
                         if not self._is_pos_occupied(state, (nr, nc)):
-                            # HEURISTIC: Don't move to where Primary is, where it's going now, 
-                            # or where it's going next.
+                            # forbidden moves are where the primary robot is currently, its future move and staying in place
                             forbidden = {p_pos, immediate_target, future_target}
                             if (nr, nc) not in forbidden:
                                 return f"{m}({rid})"
                 
-                # If we couldn't find a "perfect" spot, try any spot that isn't the immediate_target or p_pos
+                # in case we dont have a "perfect" action still try to move to the future path, maybe some tile 
+                # will open up later
                 for dr, dc, m in [(-1, 0, "UP"), (1, 0, "DOWN"), (0, -1, "LEFT"), (0, 1, "RIGHT")]:
                     nr, nc = pos[0] + dr, pos[1] + dc
                     if 0 <= nr < self.rows and 0 <= nc < self.cols and (nr, nc) not in self.walls:
                         if not self._is_pos_occupied(state, (nr, nc)) and (nr, nc) != p_pos and (nr, nc) != immediate_target:
                             return f"{m}({rid})"
 
+                # if we are "stuck", just reset
                 return "RESET"
         return None
 
@@ -298,22 +341,24 @@ class Controller:
         steps_remaining = self.game.get_max_steps() - self.game.get_current_steps()
         reset_flag = False
 
-        # 1. RESET LOGIC: Wipe stack if game state indicates a fresh start or error
+        # applying reset logic
         if (self.last_state and cur_need > self.last_state[3]) or self.last_action == "RESET":
             self.action_stack = []
             self.last_action = None
             self.last_state = None
             reset_flag = True
 
-        # 2. PLANNING LOGIC: Generate a new path if the stack is empty
+        # when action_stack is empty, we want to fill it:
         if not self.action_stack:
+            # if we dont have a cached plan, we need to generate it
             if not self.best_Astar_subpath:
                 self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar') 
                 self.best_Astar_subpath = self.action_stack.copy()
             elif reset_flag:
-                # Decide whether to reuse the cached best path or re-calculate
+                # when a reset happend, we need to check if we have enough moves to use our plan
                 if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
                     self.action_stack = self.best_Astar_subpath.copy()
+                # if we dont have enough moves, we generate a greedy plan for the remaining moves
                 else:
                     self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs') 
             
@@ -322,7 +367,7 @@ class Controller:
                 print("reset no plan")
                 return "RESET"
 
-        # 3. FAILURE HANDLING: Check if the previous action actually worked
+        # action fail handeling
         if not reset_flag and self.last_action and self.last_state:
             fix_action = self.recognize_and_fix_fail(self.last_state, self.last_action, state)
             if fix_action == "CLEAR_STACK":
@@ -333,24 +378,22 @@ class Controller:
             if fix_action:
                 return fix_action 
 
-        # 4. PRE-EXECUTION SAFETY & REDUNDANCY CHECK
-        # This section "cleans" the stack of actions that are no longer necessary
+        # we check the next action, and if we want to really perform it
         next_action_str = self.action_stack[0]
         act_name = next_action_str.split('(')[0].upper()
         p_pos, p_load = self._get_robot_data(state)
         plants_dict = dict(state[1])
         
-        # --- SMART LOAD CHECK ---
+        # we want a couple of "fixed" for the load (can happen because of the extra loads)
         if act_name == "LOAD":
-            # Rule A: Skip if already at maximum capacity
+            # if the robot is at max capacity we dont want to load
             if p_load >= self.capacities[self.primary_id]:
                 self.action_stack.pop(0)
                 return self.choose_next_action(state)
             
-            # Rule B: Skip if current load is sufficient for the target's need
+            # skip load if we allready loaded enough
             if plants_dict:
-                # We look for the maximum need currently on the board
-                # (Safety buffer: +1 to account for potential failed drops)
+                # we want to account for all target plant's needs, and add the chance of fail into account
                 max_factor = max(self.target_plants.values())
                 max_required = max_factor * (1 - self.MAX_PROB) + max_factor
                 if p_load >= max_required:
@@ -358,19 +401,17 @@ class Controller:
                     self.action_stack.pop(0)
                     return self.choose_next_action(state)
             
-            # Rule C: If not at a tap, the plan to LOAD is invalid
+            # invalid load case
             if p_pos not in dict(state[2]):
                 self.action_stack = []
                 self.last_action = "RESET"
-                print("reset load")
                 return "RESET"
 
-        # --- SMART POUR CHECK ---
         elif act_name == "POUR":
             plant_missing = p_pos not in plants_dict
             plant_need = plants_dict.get(p_pos, 0)
             
-            # Check if we should skip the pour
+            # if we have no water left of the plant is fully watered, we should skip
             is_empty = (p_load == 0)
             is_satisfied = plant_missing or (plant_need == 0)
             
@@ -378,36 +419,33 @@ class Controller:
                 self.action_stack.pop(0)
                 if not self.action_stack:
                     self.last_action = "RESET"
-                    print("reset pour")
                     return "RESET"
                 return self.choose_next_action(state)
 
-        # --- MOVEMENT CHECK ---
-        elif act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
-            r, c = p_pos
-            target_sq = p_pos
-            if act_name == "UP": target_sq = (r-1, c)
-            elif act_name == "DOWN": target_sq = (r+1, c)
-            elif act_name == "LEFT": target_sq = (r, c-1)
-            elif act_name == "RIGHT": target_sq = (r, c+1)
+        # movement check, dont really need this but ill just comment it out
+        # elif act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
+        #     r, c = p_pos
+        #     target_sq = p_pos
+        #     if act_name == "UP": target_sq = (r-1, c)
+        #     elif act_name == "DOWN": target_sq = (r+1, c)
+        #     elif act_name == "LEFT": target_sq = (r, c-1)
+        #     elif act_name == "RIGHT": target_sq = (r, c+1)
             
-            if target_sq in self.walls:
-                self.action_stack = []
-                self.last_action = "RESET"
-                print("reset walls")
-                return "RESET"
+        #     if target_sq in self.walls:
+        #         self.action_stack = []
+        #         self.last_action = "RESET"
+        #         return "RESET"
 
-        # 5. BLOCKER HANDLING: Move other robots out of the way
+        # blocking robot hendeling
         unblock_action = self.recognize_and_fix_blocking_robot(state, next_action_str)
         if unblock_action:
             if unblock_action == "RESET":
                 self.action_stack = []
                 self.last_action = "RESET"
-                print("reset unblock")
                 return "RESET"
             return unblock_action
 
-        # 6. FINAL EXECUTION: Pop the action and save the state for the next turn
+        # excuting action and updating fields
         action = self.action_stack.pop(0)
         self.last_state = state
         self.last_action = action
