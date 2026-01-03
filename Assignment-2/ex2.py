@@ -8,14 +8,12 @@ class Controller:
     def __init__(self, game: ext_plant.Game):
         self.game = game
         self.problem_desc = game.get_problem()
-        self.goal_reward = game._goal_reward
         self.rows, self.cols = self.problem_desc["Size"]
         self.walls = set(self.problem_desc["Walls"])
         self.capacities = game.get_capacities()
         self.active_robots = {}
         self.target_plants = {}
         self.is_small_world = self.rows * self.cols <= 9
-        self.extension_check = False # Fixed variable name used in choose_next_action
 
         # mean rewards calculation
         raw_rewards = self.problem_desc.get("plants_reward", {})
@@ -72,7 +70,7 @@ class Controller:
             p = probs.get(rid, 0)
             c = self.capacities.get(rid, 0)
             d1 = get_real_dist(robot_initial_positions.get(rid), best_plant_pos) if best_plant_pos else 0
-            return (p * 100) + c - d1
+            return (p * 100) + (c) - d1
 
         self.primary_id = max(probs, key=robot_selection_score)
         
@@ -81,8 +79,6 @@ class Controller:
         self.best_Astar_subpath = []
         self.last_state = None
         self.last_action = None
-        self.game_start_state = game.get_current_state()
-        self.plan_start_state = game.get_current_state()
 
         # for extra loads and pours
         self.extra_load_count = 0
@@ -155,7 +151,6 @@ class Controller:
                 # D1 calculation
                 d1 = get_real_dist(p_pos, pos)
                 if d1 >= 10000: continue # Ignore unreachable plants
-                if d1 > steps_remaining + need: continue
                 
                 # D2 calculation
                 d2 = min([get_real_dist(pos, tap) for tap in taps_dict.keys()] + [999])
@@ -168,9 +163,10 @@ class Controller:
                     best_plant_pos = pos
         
         # calculating extra loads and pours based on the robots fail probability
+        self.extra_load_count = (1 - self.MAX_PROB) * self.problem_desc["Plants"][best_plant_pos]
+        self.extra_pour_count = self.extra_load_count
+        
         if best_plant_pos:
-            self.extra_load_count = (1 - self.MAX_PROB) * self.problem_desc["Plants"][best_plant_pos]
-            self.extra_pour_count = self.extra_load_count
             return {best_plant_pos: dict(plants_list)[best_plant_pos]}
         
         return {}
@@ -340,55 +336,6 @@ class Controller:
                 return "RESET"
         return None
 
-    def _calculate_plan_value(self, plan, start_state) :
-        if not plan or not start_state: return 0.0
-
-        start_pos, start_load = self._get_robot_data(start_state)
-        plants = dict(start_state[1])
-        total_plant_needed = len([p for p, n in plants.items() if n > 0])
-        plants_watered = 0
-
-        expected_score = 0.0
-        move_cost = -3.0 / self.MAX_PROB
-        action_cost = -1.0 / self.MAX_PROB
-        current_pos = start_pos
-        current_load = start_load
-
-        for action_str in plan:
-            act_name = action_str.split('(')[0].upper()
-            expected_score += action_cost
-
-            if act_name == "UP":
-                current_pos = (current_pos[0]-1, current_pos[1])
-                expected_score += move_cost
-            elif act_name == "DOWN":
-                current_pos = (current_pos[0]+1, current_pos[1])
-                expected_score += move_cost
-            elif act_name == "LEFT":
-                current_pos = (current_pos[0], current_pos[1]-1)
-                expected_score += move_cost
-            elif act_name == "RIGHT":
-                current_pos = (current_pos[0], current_pos[1]+1)
-                expected_score += move_cost
-            elif act_name == "LOAD": current_load = self.capacities[self.primary_id]
-            elif act_name == "POUR":
-                plant_need = plants.get(current_pos, 0)
-                if plant_need > 0 and current_load > 0:
-                    # giving reward
-                    mean_r = self.mean_rewards.get(current_pos, 0)
-                    expected_score += mean_r
-                    
-                    # decrement need and load for simulation
-                    plants[current_pos] = 0 # 
-                    current_load -= 1
-                    plants_watered += 1
-            
-        if plants_watered >= total_plant_needed and total_plant_needed > 0:
-            expected_score += self.goal_reward
-
-        return expected_score
-    
-
     def choose_next_action(self, state):
         cur_need = state[3]
         steps_remaining = self.game.get_max_steps() - self.game.get_current_steps()
@@ -399,51 +346,21 @@ class Controller:
             self.action_stack = []
             self.last_action = None
             self.last_state = None
-            self.plan_start_state = self.game_start_state
             reset_flag = True
 
         # when action_stack is empty, we want to fill it:
         if not self.action_stack:
-            # applying extension logic using stored start state
-            if not self.is_small_world and not self.extension_check and self.best_Astar_subpath and self.plan_start_state:
-                old_reward = self._calculate_plan_value(self.best_Astar_subpath, self.plan_start_state)
-                
-                # calculate extension
-                new_targets = self._select_targets(state, steps_remaining)
-                new_path = self._solve_problem(state, new_targets, 'astar')
-                
-                # reward for whole previous + extension plan
-                combined_plan = self.best_Astar_subpath + new_path
-                combined_reward = self._calculate_plan_value(combined_plan, self.plan_start_state)
-                
-                average_old_reward = old_reward/len(self.best_Astar_subpath)
-                average_new_reward = combined_reward/len(combined_plan)
-                
-                # compare the rewards
-                if average_new_reward > average_old_reward * 2:
-                    self.action_stack = new_path
-                    # update the best plan
-                    self.best_Astar_subpath.extend(new_path)
-                else:
-                    self.action_stack = self.best_Astar_subpath.copy()
-                    self.extension_check = True
-
             # if we dont have a cached plan, we need to generate it
             if not self.best_Astar_subpath:
                 self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar') 
                 self.best_Astar_subpath = self.action_stack.copy()
-                if self.action_stack:
-                    self.plan_start_state = copy.deepcopy(state)
-
             elif reset_flag:
                 # when a reset happend, we need to check if we have enough moves to use our plan
                 if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
                     self.action_stack = self.best_Astar_subpath.copy()
-                    self.plan_start_state = copy.deepcopy(state)
                 # if we dont have enough moves, we generate a greedy plan for the remaining moves
                 else:
                     self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs') 
-                    self.plan_start_state = copy.deepcopy(state)
             
             if not self.action_stack:
                 self.last_action = "RESET"
@@ -455,7 +372,6 @@ class Controller:
             if fix_action == "CLEAR_STACK":
                 self.action_stack = []
                 self.last_action = "RESET"
-                self.plan_start_state = None
                 return "RESET" 
             if fix_action:
                 return fix_action 
@@ -476,7 +392,7 @@ class Controller:
             # skip load if we allready loaded enough
             if plants_dict:
                 # we want to account for all target plant's needs, and add the chance of fail into account
-                max_factor = max(self.target_plants.values()) if self.target_plants else 1
+                max_factor = max(self.target_plants.values())
                 max_required = max_factor * (1 - self.MAX_PROB) + max_factor
                 if p_load >= max_required:
                     self.action_stack.pop(0)
@@ -486,7 +402,6 @@ class Controller:
             if p_pos not in dict(state[2]):
                 self.action_stack = []
                 self.last_action = "RESET"
-                self.plan_start_state = None
                 return "RESET"
 
         elif act_name == "POUR":
@@ -501,24 +416,22 @@ class Controller:
                 self.action_stack.pop(0)
                 if not self.action_stack:
                     self.last_action = "RESET"
-                    self.plan_start_state = None
                     return "RESET"
                 return self.choose_next_action(state)
-        
-        # safety check for off-board movement
-        elif act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
-            r, c = p_pos
-            nr, nc = r, c
-            if act_name == "UP": nr -= 1
-            elif act_name == "DOWN": nr += 1
-            elif act_name == "LEFT": nc -= 1
-            elif act_name == "RIGHT": nc += 1
+
+        # movement check, dont really need this but ill just comment it out
+        # elif act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
+        #     r, c = p_pos
+        #     target_sq = p_pos
+        #     if act_name == "UP": target_sq = (r-1, c)
+        #     elif act_name == "DOWN": target_sq = (r+1, c)
+        #     elif act_name == "LEFT": target_sq = (r, c-1)
+        #     elif act_name == "RIGHT": target_sq = (r, c+1)
             
-            if not (0 <= nr < self.rows and 0 <= nc < self.cols) or (nr, nc) in self.walls:
-                self.action_stack = []
-                self.last_action = "RESET"
-                self.plan_start_state = None
-                return "RESET"
+        #     if target_sq in self.walls:
+        #         self.action_stack = []
+        #         self.last_action = "RESET"
+        #         return "RESET"
 
         # blocking robot hendeling
         unblock_action = self.recognize_and_fix_blocking_robot(state, next_action_str)
@@ -526,7 +439,6 @@ class Controller:
             if unblock_action == "RESET":
                 self.action_stack = []
                 self.last_action = "RESET"
-                self.plan_start_state = None
                 return "RESET"
             return unblock_action
 
