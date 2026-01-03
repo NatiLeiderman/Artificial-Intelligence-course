@@ -592,6 +592,31 @@ problem_new4_version2 = {
     "horizon": 40,
 }
 
+# problem_extension_test = {
+#     "Size": (10, 10),
+#     "Walls": { (4, 4), (4, 5), (5, 4), (5, 5) },  # Small central obstacle
+#     "Taps": {
+#         (8, 8): 50,  # Tap in top-left
+#     },
+#     "Plants": {
+#         (9, 9): 2,   # Plant B: Bottom-right (Far)
+#         (9, 8): 2,   # Plant C: Bottom-left (Very far)
+#     },
+#     "Robots": {
+#         10: (0, 1, 0, 4), # Robot starts near tap with small capacity (4)
+#     },
+#     "robot_chosen_action_prob": {
+#         10: 1.0, # 100% success to ensure pathing is deterministic for testing
+#     },
+#     "goal_reward": 100,
+#     "plants_reward": {
+#         (9, 9): [10, 10], # High reward - becomes attractive after moving to (0,9)
+#         (9, 8): [11, 11], # Very high reward - should trigger extension after (9,9)
+#     },
+#     "seed": 123,
+#     "horizon": 150,
+# }
+
 
 def main():
     debug_mode = False
@@ -614,6 +639,7 @@ def main():
         problem_new3_version3,
         problem_new4_version1,
         problem_new4_version2,
+        # problem_extension_test,
     ]
 
     # Map readable names to problems for clearer summary output
@@ -633,6 +659,7 @@ def main():
         "problem_new3_version3",
         "problem_new4_version1",
         "problem_new4_version2",
+        # "problem_extension_test",
     ]
 
     # Zip names with problems and slice the same range used above
@@ -655,6 +682,7 @@ def main():
         "problem_new3_version3": (5.900000, 2.025747),
         "problem_new4_version1": (38.033333, 2.906778),
         "problem_new4_version2": (16.566667, 1.627962),
+        # "problem_extension_test": (1,1),
     }
 
     # Collect per-problem summaries
