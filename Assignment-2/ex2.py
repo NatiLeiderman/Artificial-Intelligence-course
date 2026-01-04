@@ -1,8 +1,12 @@
 from __future__ import generators
 
-import math, random, sys, re, bisect, string
+import math, random, sys, bisect
 import operator, copy, os.path, inspect
 import ext_plant
+
+# AI Usage:
+# All the logic for the code I though of. AI was only used for debugging and getting code 
+# structure sometimes. 
 
 id = ["331010090"]
 
