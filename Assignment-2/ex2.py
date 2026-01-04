@@ -367,6 +367,27 @@ class Controller:
             if not self.action_stack:
                 self.last_action = "RESET"
                 return "RESET"
+            
+        plan = self.action_stack.copy()
+        last_pour_index = 0
+        moves_to_first_pour = 0
+        moves_to_second_pour = 0
+        while plan and 'POUR' not in plan[0]:
+            if 'LOAD' not in plan[0]:
+                moves_to_first_pour +=1
+            plan.pop(0)
+            last_pour_index +=1
+        while plan and 'POUR' in plan[0]:
+            plan.pop(0)
+            last_pour_index +=1
+        while plan and 'POUR' not in plan[0]:
+            if 'LOAD' not in plan[0]:
+                moves_to_second_pour +=1
+            plan.pop(0)
+        
+        if moves_to_second_pour > moves_to_first_pour + 1 and not self.is_small_world:
+            self.action_stack = self.action_stack[:last_pour_index]
+
 
         # action fail handeling
         if not reset_flag and self.last_action and self.last_state:
