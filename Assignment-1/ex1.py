@@ -89,7 +89,7 @@ class WateringProblem(search.Problem):
             action_performed = False
 
             # LOAD action
-            if robot_pos in self.tap_index_map and carry < capacity:
+            if robot_pos in self.tap_index_map and carry < capacity and carry < sum(p for p in plants):
                 tap_index = self.tap_index_map[robot_pos]
                 cur_tap_amount = taps[tap_index]
                 
