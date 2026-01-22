@@ -64,7 +64,7 @@ class Controller:
         for _, pos, _ in state[0]:
             if pos == target_pos: return True
         return False
-    
+
     def _assign_targets_per_robot(self, state, steps_remaining):
         assigned_plants = {} # Global target map for this plan
         used_plants = set()
@@ -157,64 +157,28 @@ class Controller:
         return {}
 
     def _solve_problem(self, state, targets_dict, algorithm):
-        # p_pos, p_load = self._get_robot_data(state, self.active_ids[0])
-
-        # sub_prob_dict = {
-        #     "Size": (self.rows, self.cols), 
-        #     "Walls": list(self.walls),
-        #     "Taps": dict(state[2]), 
-        #     "Plants": targets_dict,
-        #     # "Robots": {
-        #     #     rid: (
-        #     #         self._get_robot_data(state, rid)[0][0],
-        #     #         self._get_robot_data(state, rid)[0][1],
-        #     #         self._get_robot_data(state, rid)[1],
-        #     #         self.capacities[rid]
-        #     #     )
-        #     #     for rid in self.active_ids
-        #     # }
-
-        #     "Robots": {
-        #         self.active_ids[0]: { 
-        #             self._get_robot_data(state, self.active_ids[0])[0][0],
-        #             self._get_robot_data(state, self.active_ids[0])[0][1],
-        #             self._get_robot_data(state, self.active_ids[0])[1],
-        #             self.capacities[self.active_ids[0]]
-        #         }
-        #     }
-        # }
-
         p_pos, p_load = self._get_robot_data(state, self.active_ids[0])
-        
-        # Using list access for primary robot
-        current_primary = self.active_ids[0]
-        
         sub_prob_dict = {
-            "Size": (self.rows, self.cols), 
+            "Size": (self.rows, self.cols),
             "Walls": list(self.walls),
-            "Taps": dict(state[2]), 
+            "Taps": dict(state[2]),
             "Plants": targets_dict,
-            # Pass 3-element tuple for robot state to match Ex1 expectations
-            "Robots": {current_primary: (p_pos[0], p_pos[1], p_load, self.capacities[self.active_ids[0]])}
+            "Robots": {self.active_ids[0]: (p_pos[0], p_pos[1], p_load, self.capacities[self.active_ids[0]])}
         }
-
         # the risk is the robot's probability to fail
         risk = 1.0 - self.MAX_PROB
         extra_ops = 0
         if risk > 0 and targets_dict:
             # 1 extra operation for every 20% risk, minimum 1 if risk exists
-            extra_ops = int(risk * 5) + 1 
-
+            extra_ops = int(risk * 5) + 1
         try:
             # creating the problem and using ex1 code
             p = WateringProblem(sub_prob_dict)
             result = greedy_best_first_graph_search(p, p.h_astar) if algorithm == 'gbfs' else astar_search(p, p.h_astar)
             node = result[0] if isinstance(result, tuple) else result
-            
             if node:
                 actions = node.solution() if hasattr(node, 'solution') else [n.action for n in node.path() if n.action]
                 clean = ["".join(filter(str.isalpha, str(a).split('{')[0].split('(')[0])).upper() for a in actions]
-                
                 # checking if all actions are legal
                 if clean:
                     act = clean[0]
@@ -227,8 +191,8 @@ class Controller:
                     elif (act == "LOAD" and p_pos in dict(state[2])) or (act == "POUR" and p_pos in targets_dict):
                         is_start_first = True
                     if not is_start_first: clean = clean[::-1]
-                
-                # injecting the extra pours and loads, in reality we inject too many but this will be 
+
+                # injecting the extra pours and loads, in reality we inject too many but this will be
                 # ignored thorugh the choose_next_action logic
                 final_actions = []
                 for act in clean:
@@ -242,7 +206,7 @@ class Controller:
                         for _ in range(extra_ops):
                             final_actions.append("POUR")
 
-                return [f"{a}({self.primary_id})" for a in final_actions]
+                return [f"{a}({self.active_ids[0]})" for a in final_actions]
         except: pass
         return []
 
@@ -357,11 +321,9 @@ class Controller:
             if self.last_action and self.last_action != "RESET" and self.last_state:
                 prev_rid = int(self.last_action.split('(')[1].split(')')[0])
                 act_name = self.last_action.split('(')[0]
-                
                 # Retrieve positions
                 prev_pos = next(pos for rid, pos, _ in self.last_state[0] if rid == prev_rid)
                 curr_pos = next(pos for rid, pos, _ in state[0] if rid == prev_rid)
-                
                 # Calculate expected pos
                 r, c = prev_pos
                 expected = prev_pos
@@ -369,27 +331,19 @@ class Controller:
                 elif act_name == "DOWN": expected = (r+1, c)
                 elif act_name == "LEFT": expected = (r, c-1)
                 elif act_name == "RIGHT": expected = (r, c+1)
-                
                 # If we moved exactly where expected, it's a success
                 if curr_pos == expected:
                     self.robot_success_counts[prev_rid] += 1
-
             # 2. Check if testing is done
             if self.currentTestStep >= self.testSteps:
                 # Calculate probabilities
                 for rid in self.robot_ids:
-                    # Success count / 2 attempts
-                    # Note: We divide by 2. If count is 0, prob is 0.
-                    # We might want a small epsilon to avoid div by zero issues later, 
-                    # but the requirement says success/2.
                     self.probs[rid] = self.robot_success_counts[rid] / 2.0
-                
                 # Calculate MAX_PROB
                 if self.probs:
                     self.MAX_PROB = max(max(self.probs.values()), 0.1)
                 else:
-                    self.MAX_PROB = 0 # Should not happen if robots exist
-
+                    self.MAX_PROB = 0 
                 def get_real_dist_init(start, end):
                     if start == end: return 0
                     queue = [(start, 0)]
@@ -399,14 +353,14 @@ class Controller:
                         for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                             nr, nc = r + dr, c + dc
                             if (nr, nc) == end: return dist + 1
-                            if (0 <= nr < self.rows and 0 <= nc < self.cols and 
+                            if (0 <= nr < self.rows and 0 <= nc < self.cols and
                                 (nr, nc) not in self.walls and (nr, nc) not in visited):
                                 visited.add((nr, nc))
                                 queue.append(((nr, nc), dist + 1))
                     return 10000
-
+                
                 # Identify best plant (same logic as init)
-                current_state = state # Use current state
+                current_state = state 
                 taps_dict = dict(current_state[2])
                 best_plant_pos = None
                 highest_target_score = -1
@@ -421,66 +375,49 @@ class Controller:
                             best_plant_pos = pos
 
                 robot_initial_positions = {r_id: pos for r_id, pos, _ in current_state[0]}
-                
                 def robot_selection_score(rid):
-                    p = self.probs.get(rid, 0) # Use the calculated probs
+                    p = self.probs.get(rid, 0) 
                     c = self.capacities.get(rid, 0)
                     d1 = get_real_dist_init(robot_initial_positions.get(rid), best_plant_pos) if best_plant_pos else 0
                     return (p * 100) + (c) - d1
-
+                
                 if self.robot_ids:
                     ranked = sorted(self.robot_ids, key=robot_selection_score, reverse=True)
-                    if self.is_small_world:
-                        # BEST TWO robots
-                        self.active_ids = ranked[:2]
-                    else:
-                        # BEST ONE robot (original behavior)
-                        self.active_ids = [ranked[0]]
-                else:
-                    self.active_ids = []
+                    # if self.is_small_world:
+                    #     # BEST TWO robots
+                    #     self.active_ids = ranked[:2]
+                    # else:
+                    #     # BEST ONE robot (original behavior)
+                    self.active_ids = [ranked[0]]
 
                 self.last_state = state
                 self.last_action = None
                 self.isTesting = False
-
                 return "RESET"
-                
             else:
                 # 3. Perform Test Action
-                # Determine which robot acts: 2 steps per robot.
-                # Robot index = step // 2
                 rid_idx = self.currentTestStep // 2
                 if rid_idx < len(self.robot_ids):
                     rid = self.robot_ids[rid_idx]
-                    
-                    # Find a valid move action (randomly)
-                    # We need current pos of this robot
                     r, c = next(pos for r_id, pos, _ in state[0] if r_id == rid)
-                    
                     possible_moves = []
                     for move, (dr, dc) in [("UP", (-1,0)), ("DOWN", (1,0)), ("LEFT", (0,-1)), ("RIGHT", (0,1))]:
                         nr, nc = r + dr, c + dc
                         if 0 <= nr < self.rows and 0 <= nc < self.cols and (nr, nc) not in self.walls:
-                            # Avoid other robots to ensure clean test
                             if not self._is_pos_occupied(state, (nr, nc)):
                                 possible_moves.append(move)
-                    
                     if possible_moves:
                         action_name = random.choice(possible_moves)
                         action = f"{action_name}({rid})"
-                        
                         self.last_state = state
                         self.last_action = action
                         self.currentTestStep += 1
                         return action
                     else:
-                        # Robot trapped? Skip testing step
                         self.currentTestStep += 1
-                        return "RESET" # Or just skip to next
-                
+                        return "RESET" 
                 self.currentTestStep += 1
-                return "RESET" # Should catch edge cases
-
+                return "RESET" 
         cur_need = state[3]
         steps_remaining = self.game.get_max_steps() - self.game.get_current_steps()
         reset_flag = False
@@ -492,27 +429,18 @@ class Controller:
             self.last_state = None
             reset_flag = True
 
-        # print(state)
-        # print(cur_need)
-        # print(steps_remaining)
-
         # when action_stack is empty, we want to fill it:
         if not self.action_stack:
-            # if we dont have a cached plan, we need to generate it
             if not self.best_Astar_subpath:
                 self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar')
                 self.best_Astar_subpath = self.action_stack.copy()
             elif reset_flag:
-                # when a reset happend, we need to check if we have enough moves to use our plan
                 if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
                     self.action_stack = self.best_Astar_subpath.copy()
-                # if we dont have enough moves, we generate a greedy plan for the remaining moves
                 else:
-                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs') 
-            
+                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs')
             if not self.action_stack:
                 self.last_action = "RESET"
-                # print("reset1")
                 return "RESET"
             
         plan = self.action_stack.copy()
@@ -531,7 +459,7 @@ class Controller:
             if 'LOAD' not in plan[0]:
                 moves_to_second_pour +=1
             plan.pop(0)
-        
+
         if moves_to_second_pour > moves_to_first_pour + 1 and not self.is_small_world:
             self.action_stack = self.action_stack[:last_pour_index]
 
@@ -544,67 +472,43 @@ class Controller:
             if fix_action == "CLEAR_STACK":
                 self.action_stack = []
                 self.last_action = "RESET"
-                return "RESET" 
+                return "RESET"
             if fix_action:
-                return fix_action 
-
+                return fix_action
+            
         # we check the next action, and if we want to really perform it
+        next_action_str = self.action_stack[0]
         act_name = next_action_str.split('(')[0].upper()
         p_pos, p_load = self._get_robot_data(state, acting_rid)
         plants_dict = dict(state[1])
-        
-        # we want a couple of "fixed" for the load (can happen because of the extra loads)
+
         if act_name == "LOAD":
-            # if the robot is at max capacity we dont want to load
-            if p_load >= self.capacities[self.active_ids[acting_rid]]:
+            if p_load >= self.capacities[acting_rid]:
                 self.action_stack.pop(0)
                 return self.choose_next_action(state)
-            
-            # skip load if we allready loaded enough
             if plants_dict:
-                # we want to account for all target plant's needs, and add the chance of fail into account
                 max_factor = max(self.target_plants.values())
                 max_required = max_factor * (1 - self.MAX_PROB) + max_factor
                 if p_load >= max_required:
                     self.action_stack.pop(0)
                     return self.choose_next_action(state)
-            
-            # invalid load case
             if p_pos not in dict(state[2]):
                 self.action_stack = []
                 self.last_action = "RESET"
                 return "RESET"
-
+            
         elif act_name == "POUR":
             plant_missing = p_pos not in plants_dict
             plant_need = plants_dict.get(p_pos, 0)
-            
-            # if we have no water left of the plant is fully watered, we should skip
             is_empty = (p_load == 0)
             is_satisfied = plant_missing or (plant_need == 0)
-            
             if is_empty or is_satisfied:
                 self.action_stack.pop(0)
                 if not self.action_stack:
                     self.last_action = "RESET"
                     return "RESET"
                 return self.choose_next_action(state)
-
-        # movement check, dont really need this but ill just comment it out
-        elif act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
-            r, c = p_pos
-            target_sq = p_pos
-            if act_name == "UP": target_sq = (r-1, c)
-            elif act_name == "DOWN": target_sq = (r+1, c)
-            elif act_name == "LEFT": target_sq = (r, c-1)
-            elif act_name == "RIGHT": target_sq = (r, c+1)
             
-            if target_sq in self.walls:
-                self.action_stack = []
-                self.last_action = "RESET"
-                print("reset6")
-                return "RESET"
-
         # blocking robot hendeling
         unblock_action = self.recognize_and_fix_blocking_robot(state, next_action_str, acting_rid)
         if unblock_action:
@@ -613,11 +517,11 @@ class Controller:
                 self.last_action = "RESET"
                 return "RESET"
             return unblock_action
-
-        # excuting action and updating fields
+        
         action = self.action_stack.pop(0)
         self.last_state = state
         self.last_action = action
+
         return action
 
 class Problem:
