@@ -5,7 +5,7 @@ import random
 import copy
 import collections
 
-import math, random, sys, bisect
+import math, random, sys, bisect, re
 import operator, copy, os.path, inspect
 
 # ID
@@ -59,6 +59,13 @@ class Controller:
         for r_id, pos, load in state[0]:
             if r_id == rid: return pos, load
         return None, 0
+
+    def _parse_action_string(self, action_str):
+        # Matches alphanumeric action name and numeric ID inside {} or ()
+        match = re.search(r"([A-Za-z]+)[\{\(](\d+)[\}\)]", str(action_str))
+        if match:
+            return match.group(1).upper(), int(match.group(2))
+        return None, None
 
     def _is_pos_occupied(self, state, target_pos):
         for _, pos, _ in state[0]:
@@ -157,14 +164,22 @@ class Controller:
         return {}
 
     def _solve_problem(self, state, targets_dict, algorithm):
-        p_pos, p_load = self._get_robot_data(state, self.active_ids[0])
         sub_prob_dict = {
-            "Size": (self.rows, self.cols),
+            "Size": (self.rows, self.cols), 
             "Walls": list(self.walls),
-            "Taps": dict(state[2]),
+            "Taps": dict(state[2]), 
             "Plants": targets_dict,
-            "Robots": {self.active_ids[0]: (p_pos[0], p_pos[1], p_load, self.capacities[self.active_ids[0]])}
+            "Robots": {
+                rid: (
+                    self._get_robot_data(state, rid)[0][0],
+                    self._get_robot_data(state, rid)[0][1],
+                    self._get_robot_data(state, rid)[1],
+                    self.capacities[rid]
+                )
+                for rid in self.active_ids
+            }
         }
+
         # the risk is the robot's probability to fail
         risk = 1.0 - self.MAX_PROB
         extra_ops = 0
@@ -176,14 +191,18 @@ class Controller:
             p = WateringProblem(sub_prob_dict)
             result = greedy_best_first_graph_search(p, p.h_astar) if algorithm == 'gbfs' else astar_search(p, p.h_astar)
             node = result[0] if isinstance(result, tuple) else result
+
             if node:
                 actions = node.solution() if hasattr(node, 'solution') else [n.action for n in node.path() if n.action]
-                clean = ["".join(filter(str.isalpha, str(a).split('{')[0].split('(')[0])).upper() for a in actions]
+                clean = actions.copy()
                 # checking if all actions are legal
                 if clean:
-                    act = clean[0]
+                    act_str = str(clean[0])
+                    act, rid = self._parse_action_string(act_str)
+                    p_pos, _ = self._get_robot_data(state, rid)
                     r, c = p_pos
                     is_start_first = False
+
                     if act in ["UP", "DOWN", "LEFT", "RIGHT"]:
                         tr = (r-1, c) if act == "UP" else (r+1, c) if act == "DOWN" else (r, c-1) if act == "LEFT" else (r, c+1)
                         if 0 <= tr[0] < self.rows and 0 <= tr[1] < self.cols and tr not in self.walls:
@@ -192,22 +211,28 @@ class Controller:
                         is_start_first = True
                     if not is_start_first: clean = clean[::-1]
 
+
                 # injecting the extra pours and loads, in reality we inject too many but this will be
                 # ignored thorugh the choose_next_action logic
                 final_actions = []
-                for act in clean:
-                    final_actions.append(act)
+                for action in clean:
+                    act_str = str(action)
+                    act, rid = self._parse_action_string(act_str)
+
+                    final_actions.append(f"{act}({rid})")
                     if act == "LOAD":
                         # adding the extra loads
                         for _ in range(extra_ops):
-                            final_actions.append("LOAD")
+                            final_actions.append(f"LOAD({rid})")
                     elif act == "POUR":
                         # adding the extra pours
                         for _ in range(extra_ops):
-                            final_actions.append("POUR")
+                            final_actions.append(f"POUR({rid})")
 
-                return [f"{a}({self.active_ids[0]})" for a in final_actions]
-        except: pass
+                return final_actions
+            
+        except Exception as e:
+            print(f"Solver error: {e}")
         return []
 
     def _calculate_optimal_path(self, state, steps_remaining, algorithm):
@@ -217,14 +242,15 @@ class Controller:
             return []
         return self._solve_problem(state, robot_targets, algorithm)
 
-    def recognize_and_fix_fail(self, last_state, last_action, current_state, acting_rid):
+    def recognize_and_fix_fail(self, last_state, last_action, current_state):
         if not last_action or last_action == "RESET":
             return None
-        
-        act_name = last_action.split('(')[0].upper()
-        rid = self.active_ids[0]
-        p_prev, l_prev = self._get_robot_data(last_state, acting_rid)
-        p_curr, l_curr = self._get_robot_data(current_state, acting_rid)
+
+        act_str = str(last_action)
+        act_name, rid = self._parse_action_string(act_str)
+
+        p_prev, l_prev = self._get_robot_data(last_state, rid)
+        p_curr, l_curr = self._get_robot_data(current_state, rid)
         
         # movement fail handeling
         if act_name in ["UP", "DOWN", "LEFT", "RIGHT"]:
@@ -321,9 +347,11 @@ class Controller:
             if self.last_action and self.last_action != "RESET" and self.last_state:
                 prev_rid = int(self.last_action.split('(')[1].split(')')[0])
                 act_name = self.last_action.split('(')[0]
+
                 # Retrieve positions
                 prev_pos = next(pos for rid, pos, _ in self.last_state[0] if rid == prev_rid)
                 curr_pos = next(pos for rid, pos, _ in state[0] if rid == prev_rid)
+
                 # Calculate expected pos
                 r, c = prev_pos
                 expected = prev_pos
@@ -331,9 +359,11 @@ class Controller:
                 elif act_name == "DOWN": expected = (r+1, c)
                 elif act_name == "LEFT": expected = (r, c-1)
                 elif act_name == "RIGHT": expected = (r, c+1)
+
                 # If we moved exactly where expected, it's a success
                 if curr_pos == expected:
                     self.robot_success_counts[prev_rid] += 1
+
             # 2. Check if testing is done
             if self.currentTestStep >= self.testSteps:
                 # Calculate probabilities
@@ -383,15 +413,15 @@ class Controller:
                 
                 if self.robot_ids:
                     ranked = sorted(self.robot_ids, key=robot_selection_score, reverse=True)
-                    # if self.is_small_world:
-                    #     # BEST TWO robots
-                    #     self.active_ids = ranked[:2]
-                    # else:
-                    #     # BEST ONE robot (original behavior)
-                    self.active_ids = [ranked[0]]
+                    if self.is_small_world:
+                        # BEST TWO robots
+                        self.active_ids = ranked[:2]
+                    else:
+                        # BEST ONE robot (original behavior)
+                        self.active_ids = [ranked[0]]
 
                 self.last_state = state
-                self.last_action = None
+                self.last_action = "RESET"
                 self.isTesting = False
                 return "RESET"
             else:
@@ -418,6 +448,7 @@ class Controller:
                         return "RESET" 
                 self.currentTestStep += 1
                 return "RESET" 
+            
         cur_need = state[3]
         steps_remaining = self.game.get_max_steps() - self.game.get_current_steps()
         reset_flag = False
@@ -464,11 +495,11 @@ class Controller:
             self.action_stack = self.action_stack[:last_pour_index]
 
         next_action_str = self.action_stack[0]
-        acting_rid = int(next_action_str.split('(')[1].split(')')[0])
+        action_name, acting_rid = self._parse_action_string(next_action_str)
 
         # action fail handeling
         if not reset_flag and self.last_action and self.last_state:
-            fix_action = self.recognize_and_fix_fail(self.last_state, self.last_action, state, acting_rid)
+            fix_action = self.recognize_and_fix_fail(self.last_state, self.last_action, state)
             if fix_action == "CLEAR_STACK":
                 self.action_stack = []
                 self.last_action = "RESET"
@@ -478,11 +509,10 @@ class Controller:
             
         # we check the next action, and if we want to really perform it
         next_action_str = self.action_stack[0]
-        act_name = next_action_str.split('(')[0].upper()
         p_pos, p_load = self._get_robot_data(state, acting_rid)
         plants_dict = dict(state[1])
 
-        if act_name == "LOAD":
+        if action_name == "LOAD":
             if p_load >= self.capacities[acting_rid]:
                 self.action_stack.pop(0)
                 return self.choose_next_action(state)
@@ -497,7 +527,7 @@ class Controller:
                 self.last_action = "RESET"
                 return "RESET"
             
-        elif act_name == "POUR":
+        elif action_name == "POUR":
             plant_missing = p_pos not in plants_dict
             plant_need = plants_dict.get(p_pos, 0)
             is_empty = (p_load == 0)
