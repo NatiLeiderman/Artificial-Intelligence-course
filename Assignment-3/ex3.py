@@ -45,6 +45,7 @@ class Controller:
         # Placeholder for calculated probs (will be filled after testing)
         self.probs = {} 
         self.MAX_PROB = 0
+        self.secondary = None
 
         # PLANNING VARIABLES
         self.action_stack = []
@@ -164,6 +165,8 @@ class Controller:
         return {}
 
     def _solve_problem(self, state, targets_dict, algorithm):
+        print(self.active_ids)
+        print(state[0])
         sub_prob_dict = {
             "Size": (self.rows, self.cols), 
             "Walls": list(self.walls),
@@ -183,9 +186,9 @@ class Controller:
         # the risk is the robot's probability to fail
         risk = 1.0 - self.MAX_PROB
         extra_ops = 0
-        if risk > 0 and targets_dict:
+        if targets_dict:
             # 1 extra operation for every 20% risk, minimum 1 if risk exists
-            extra_ops = int(risk * 5) + 1
+            extra_ops = int((risk+0.2) * 5)
         try:
             # creating the problem and using ex1 code
             p = WateringProblem(sub_prob_dict)
@@ -211,20 +214,23 @@ class Controller:
                         is_start_first = True
                     if not is_start_first: clean = clean[::-1]
 
-
                 # injecting the extra pours and loads, in reality we inject too many but this will be
                 # ignored thorugh the choose_next_action logic
+                load_flag = False
                 final_actions = []
                 for action in clean:
                     act_str = str(action)
                     act, rid = self._parse_action_string(act_str)
 
                     final_actions.append(f"{act}({rid})")
-                    if act == "LOAD":
+                    if act == "LOAD" and load_flag == False:
+                        load_flag = True
                         # adding the extra loads
                         for _ in range(extra_ops):
                             final_actions.append(f"LOAD({rid})")
-                    elif act == "POUR":
+                    else:
+                        load_flag = False
+                    if act == "POUR":
                         # adding the extra pours
                         for _ in range(extra_ops):
                             final_actions.append(f"POUR({rid})")
@@ -339,6 +345,7 @@ class Controller:
                             return f"{m}({rid})"
 
                 # if we are "stuck", just reset
+                print("reset7")
                 return "RESET"
         return None
 
@@ -364,7 +371,6 @@ class Controller:
                 if curr_pos == expected:
                     self.robot_success_counts[prev_rid] += 1
 
-            # 2. Check if testing is done
             if self.currentTestStep >= self.testSteps:
                 # Calculate probabilities
                 for rid in self.robot_ids:
@@ -393,6 +399,7 @@ class Controller:
                 current_state = state 
                 taps_dict = dict(current_state[2])
                 best_plant_pos = None
+                best_plant_need = 0
                 highest_target_score = -1
 
                 for pos, need in current_state[1]:
@@ -403,19 +410,22 @@ class Controller:
                         if p_score > highest_target_score:
                             highest_target_score = p_score
                             best_plant_pos = pos
+                            best_plant_need = need
 
                 robot_initial_positions = {r_id: pos for r_id, pos, _ in current_state[0]}
                 def robot_selection_score(rid):
                     p = self.probs.get(rid, 0) 
                     c = self.capacities.get(rid, 0)
                     d1 = get_real_dist_init(robot_initial_positions.get(rid), best_plant_pos) if best_plant_pos else 0
-                    return (p * 100) + (c) - d1
+                    return (p * 100) + (c) - d1 + best_plant_need
                 
                 if self.robot_ids:
                     ranked = sorted(self.robot_ids, key=robot_selection_score, reverse=True)
                     if self.is_small_world:
                         # BEST TWO robots
+                        self.secondary = ranked[1]
                         self.active_ids = ranked[:2]
+                        self.active_ids = self.active_ids[::-1]    
                     else:
                         # BEST ONE robot (original behavior)
                         self.active_ids = [ranked[0]]
@@ -456,23 +466,24 @@ class Controller:
         # applying reset logic
         if (self.last_state and cur_need > self.last_state[3]) or self.last_action == "RESET":
             self.action_stack = []
-            self.last_action = None
-            self.last_state = None
             reset_flag = True
 
+        if not self.action_stack and reset_flag == False:
+            self.last_action = "RESET"
+            print("reset1")
+            return "RESET"
+
         # when action_stack is empty, we want to fill it:
-        if not self.action_stack:
+        if not self.action_stack and reset_flag == True:
             if not self.best_Astar_subpath:
                 self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar')
                 self.best_Astar_subpath = self.action_stack.copy()
-            elif reset_flag:
-                if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
-                    self.action_stack = self.best_Astar_subpath.copy()
-                else:
-                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs')
-            if not self.action_stack:
-                self.last_action = "RESET"
-                return "RESET"
+            else:
+                print("cache")
+                # if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
+                self.action_stack = self.best_Astar_subpath.copy()
+            # else:
+            #     self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs')
             
         plan = self.action_stack.copy()
         last_pour_index = 0
@@ -503,6 +514,7 @@ class Controller:
             if fix_action == "CLEAR_STACK":
                 self.action_stack = []
                 self.last_action = "RESET"
+                print("reset2")
                 return "RESET"
             if fix_action:
                 return fix_action
@@ -525,6 +537,7 @@ class Controller:
             if p_pos not in dict(state[2]):
                 self.action_stack = []
                 self.last_action = "RESET"
+                print("reset3")
                 return "RESET"
             
         elif action_name == "POUR":
@@ -532,11 +545,20 @@ class Controller:
             plant_need = plants_dict.get(p_pos, 0)
             is_empty = (p_load == 0)
             is_satisfied = plant_missing or (plant_need == 0)
-            if is_empty or is_satisfied:
+            if is_satisfied or is_empty:
                 self.action_stack.pop(0)
                 if not self.action_stack:
-                    self.last_action = "RESET"
-                    return "RESET"
+                    if cur_need == plant_need and p_load == 0 and cur_need != 0 and self.is_small_world:
+                        print("hi", self.secondary)
+                        temp = self.active_ids
+                        self.active_ids = [self.secondary]
+                        self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar')
+                        print(self.action_stack)
+                        self.active_ids = temp
+                    else:
+                        self.last_action = "RESET"
+                        print("reset4")
+                        return "RESET"
                 return self.choose_next_action(state)
             
         # blocking robot hendeling
@@ -545,10 +567,12 @@ class Controller:
             if unblock_action == "RESET":
                 self.action_stack = []
                 self.last_action = "RESET"
+                print("reset5")
                 return "RESET"
             return unblock_action
         
         action = self.action_stack.pop(0)
+        print(action)
         self.last_state = state
         self.last_action = action
 
