@@ -1,5 +1,3 @@
-id = ["331010090"]
-
 """
 AI Usage: firstly I used Gemini to implement the program, but it did very poorly so I rewrote the whole program by myself
 and it run 20x faster. Then after a few more optemizations which I implented by myself I got to very satisfuying running times.

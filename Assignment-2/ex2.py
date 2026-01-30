@@ -8,8 +8,6 @@ import ext_plant
 # All the logic for the code I though of. AI was only used for debugging and getting code 
 # structure sometimes. 
 
-id = ["331010090"]
-
 class Controller:
     def __init__(self, game: ext_plant.Game):
         self.game = game

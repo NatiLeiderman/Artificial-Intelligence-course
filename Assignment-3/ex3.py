@@ -8,11 +8,9 @@ import collections
 import math, random, sys, bisect, re
 import operator, copy, os.path, inspect
 
-# ID
-id = ["331010090"]
-
-# NOTE TO SELF - FOR NOW, THE STATE OF THE ROBOT DOESNT CHANGE IN THE TESTING FOR SOME REASON. 
-# SO THAT LEADS TO THE SOLVE PROBLEM NOT WORKING.
+# AI USAGE - I had to refactor my code to use multiple robots, and add a testing faze in order to estimate the robots probabilities.
+# In both I tried using AI for help, but the code design was horrible and didnt match what i needed, so I ended up doing all the refactoring
+# myself and only used AI in order to help me find bugs (which in most cases wasn't very helpful anyways)
 
 class Controller:
     def __init__(self, game: ext_plant.Game):
@@ -40,14 +38,15 @@ class Controller:
         self.testSteps = self.num_robots * 2
         self.currentTestStep = 0
         
-        # Track successes: {robot_id: count}
+        # success counters for testing
         self.robot_success_counts = {rid: 0 for rid in self.robot_ids}
-        # Placeholder for calculated probs (will be filled after testing)
+
+        # probs
         self.probs = {} 
         self.MAX_PROB = 0
         self.secondary = None
 
-        # PLANNING VARIABLES
+        # planning and caching plan
         self.action_stack = []
         self.best_Astar_subpath = []
         self.last_state = None
@@ -165,8 +164,6 @@ class Controller:
         return {}
 
     def _solve_problem(self, state, targets_dict, algorithm):
-        print(self.active_ids)
-        print(state[0])
         sub_prob_dict = {
             "Size": (self.rows, self.cols), 
             "Walls": list(self.walls),
@@ -345,7 +342,6 @@ class Controller:
                             return f"{m}({rid})"
 
                 # if we are "stuck", just reset
-                print("reset7")
                 return "RESET"
         return None
 
@@ -355,11 +351,10 @@ class Controller:
                 prev_rid = int(self.last_action.split('(')[1].split(')')[0])
                 act_name = self.last_action.split('(')[0]
 
-                # Retrieve positions
                 prev_pos = next(pos for rid, pos, _ in self.last_state[0] if rid == prev_rid)
                 curr_pos = next(pos for rid, pos, _ in state[0] if rid == prev_rid)
 
-                # Calculate expected pos
+                # expected position
                 r, c = prev_pos
                 expected = prev_pos
                 if act_name == "UP": expected = (r-1, c)
@@ -367,15 +362,15 @@ class Controller:
                 elif act_name == "LEFT": expected = (r, c-1)
                 elif act_name == "RIGHT": expected = (r, c+1)
 
-                # If we moved exactly where expected, it's a success
+                # success if we moved where we expected to
                 if curr_pos == expected:
                     self.robot_success_counts[prev_rid] += 1
 
             if self.currentTestStep >= self.testSteps:
-                # Calculate probabilities
+                # calculating all probabilities (estimations)
                 for rid in self.robot_ids:
                     self.probs[rid] = self.robot_success_counts[rid] / 2.0
-                # Calculate MAX_PROB
+                # calculating max prob
                 if self.probs:
                     self.MAX_PROB = max(max(self.probs.values()), 0.1)
                 else:
@@ -395,7 +390,7 @@ class Controller:
                                 queue.append(((nr, nc), dist + 1))
                     return 10000
                 
-                # Identify best plant (same logic as init)
+                # best plant identification
                 current_state = state 
                 taps_dict = dict(current_state[2])
                 best_plant_pos = None
@@ -422,12 +417,12 @@ class Controller:
                 if self.robot_ids:
                     ranked = sorted(self.robot_ids, key=robot_selection_score, reverse=True)
                     if self.is_small_world:
-                        # BEST TWO robots
+                        # best two robots
                         self.secondary = ranked[1]
                         self.active_ids = ranked[:2]
                         self.active_ids = self.active_ids[::-1]    
                     else:
-                        # BEST ONE robot (original behavior)
+                        # best one robot (original behavior)
                         self.active_ids = [ranked[0]]
 
                 self.last_state = state
@@ -435,7 +430,7 @@ class Controller:
                 self.isTesting = False
                 return "RESET"
             else:
-                # 3. Perform Test Action
+                # perform test action
                 rid_idx = self.currentTestStep // 2
                 if rid_idx < len(self.robot_ids):
                     rid = self.robot_ids[rid_idx]
@@ -470,7 +465,6 @@ class Controller:
 
         if not self.action_stack and reset_flag == False:
             self.last_action = "RESET"
-            print("reset1")
             return "RESET"
 
         # when action_stack is empty, we want to fill it:
@@ -478,12 +472,13 @@ class Controller:
             if not self.best_Astar_subpath:
                 self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar')
                 self.best_Astar_subpath = self.action_stack.copy()
-            else:
-                print("cache")
-                # if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
-                self.action_stack = self.best_Astar_subpath.copy()
-            # else:
-            #     self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs')
+            elif reset_flag:
+                # when a reset happend, we need to check if we have enough moves to use our plan
+                if len(self.best_Astar_subpath) <= steps_remaining * self.MAX_PROB:
+                    self.action_stack = self.best_Astar_subpath.copy()
+                # if we dont have enough moves, we generate a greedy plan for the remaining moves
+                else:
+                    self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'gbfs') 
             
         plan = self.action_stack.copy()
         last_pour_index = 0
@@ -514,7 +509,6 @@ class Controller:
             if fix_action == "CLEAR_STACK":
                 self.action_stack = []
                 self.last_action = "RESET"
-                print("reset2")
                 return "RESET"
             if fix_action:
                 return fix_action
@@ -537,7 +531,6 @@ class Controller:
             if p_pos not in dict(state[2]):
                 self.action_stack = []
                 self.last_action = "RESET"
-                print("reset3")
                 return "RESET"
             
         elif action_name == "POUR":
@@ -549,15 +542,12 @@ class Controller:
                 self.action_stack.pop(0)
                 if not self.action_stack:
                     if cur_need == plant_need and p_load == 0 and cur_need != 0 and self.is_small_world:
-                        print("hi", self.secondary)
                         temp = self.active_ids
                         self.active_ids = [self.secondary]
                         self.action_stack = self._calculate_optimal_path(state, steps_remaining, 'astar')
-                        print(self.action_stack)
                         self.active_ids = temp
                     else:
                         self.last_action = "RESET"
-                        print("reset4")
                         return "RESET"
                 return self.choose_next_action(state)
             
@@ -567,12 +557,10 @@ class Controller:
             if unblock_action == "RESET":
                 self.action_stack = []
                 self.last_action = "RESET"
-                print("reset5")
                 return "RESET"
             return unblock_action
         
         action = self.action_stack.pop(0)
-        print(action)
         self.last_state = state
         self.last_action = action
 
